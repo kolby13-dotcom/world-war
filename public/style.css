@@ -392,3 +392,7 @@ input[type=range]:disabled { opacity: .5; }
 .ally-tag { flex: none; font-size: 14px; }
 .lb-tip { margin: 8px 4px 0; font-size: 11px; color: var(--muted); line-height: 1.35; }
 .chips.even .chip { flex: 1; }
+.danger-zone { margin-top: 4px; border-radius: 16px; padding: 10px 12px; background: rgba(255,77,109,.08); display: grid; gap: 8px; }
+.danger-zone summary { cursor: pointer; font-weight: 900; color: var(--danger); list-style: none; }
+.danger-zone[open] summary { margin-bottom: 2px; }
+.legal { font-size: 12px; margin-top: 10px; } .legal a { color: var(--muted); }

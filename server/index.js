@@ -164,6 +164,23 @@ function gameTick(l) {
   }
 }
 
+// Remove an account and every trace of it (Google Play requires account deletion).
+function deleteAccount(k) {
+  const u = db.users[k]; if (!u) return 'No such account.';
+  for (const l of lobbies.values()) if (l.state !== 'lobby' && l.members.some(m => m.k === k)) return 'Leave your match first, then delete your account.';
+  leaveLobby(k);
+  for (const o of Object.values(db.users)) { o.friends = o.friends.filter(x => x !== k); o.incoming = o.incoming.filter(x => x !== k); o.outgoing = o.outgoing.filter(x => x !== k); }
+  for (const [t, v] of Object.entries(db.tokens)) if (v === k) delete db.tokens[t];
+  const friends = u.friends;
+  delete db.users[k]; save();
+  store.dropAvatar(k).catch(() => {});
+  for (const f of friends) pushFriends(f);
+  for (const ws of online.get(k) || []) { send(ws, { t: 'deleted' }); ws.user = null; }
+  online.delete(k);
+  return null;
+}
+function checkPassword(name, pw) { const k = key(name), u = db.users[k]; return u && hashPw(String(pw || ''), u.salt) === u.hash ? k : null; }
+
 // ---------------- message handling ----------------
 const LIMITS = { maxPlayers: [2, 16], bots: [0, 15], startMoney: [0, 50000], spawnTime: [5, 60], winPercent: [30, 100] };
 function handle(ws, msg) {
@@ -200,6 +217,11 @@ function handle(ws, msg) {
   const u = db.users[k];
   switch (msg.t) {
     case 'logout': delete db.tokens[msg.token]; save(); ws.close(); return;
+    case 'delete_account': {
+      if (!checkPassword(u.username, msg.password)) return err(ws, 'That password isn\'t right.');
+      const e = deleteAccount(k); if (e) return err(ws, e);
+      return;
+    }
     case 'friend_add': {
       const fk = key(msg.username);
       if (!db.users[fk]) return err(ws, 'No player with that username.');
@@ -325,7 +347,8 @@ function authed(ws, k, token) {
 }
 
 // ---------------- http ----------------
-const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json' };
+const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json', '.jpg': 'image/jpeg' };
+const deleteHits = new Map();
 const server = http.createServer((req, res) => {
   let p; try { p = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch { res.writeHead(400); return res.end(); }
   if (p.startsWith('/avatar/')) {
@@ -336,7 +359,27 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': au.avType || 'image/jpeg', 'Cache-Control': 'public, max-age=86400' }); res.end(data);
     }, () => { res.writeHead(500); res.end(); });
   }
+  // Android app link verification. Paste the file's contents into the ASSET_LINKS setting on the host,
+  // or commit it as public/.well-known/assetlinks.json.
+  if (p === '/.well-known/assetlinks.json' && process.env.ASSET_LINKS) { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(process.env.ASSET_LINKS); }
+  // account deletion from the web (linked from the privacy page and the Play listing)
+  if (p === '/api/delete-account' && req.method === 'POST') {
+    let body = ''; req.on('data', (c) => { body += c; if (body.length > 10000) req.destroy(); });
+    req.on('end', () => {
+      let m = {}; try { m = JSON.parse(body); } catch { /* bad json */ }
+      const now = Date.now(), ip = req.socket.remoteAddress || '';
+      const hits = (deleteHits.get(ip) || []).filter(t => now - t < 60000); hits.push(now); deleteHits.set(ip, hits);
+      const reply = (code, msg) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ msg })); };
+      if (hits.length > 5) return reply(429, 'Too many tries. Wait a minute and try again.');
+      const k = checkPassword(m.username, m.password);
+      if (!k) return reply(403, 'Wrong username or password.');
+      const e = deleteAccount(k); if (e) return reply(409, e);
+      reply(200, 'Your account and everything saved with it has been deleted.');
+    });
+    return;
+  }
   if (p === '/' || p.startsWith('/join/')) p = '/index.html';
+  if (p === '/privacy' || p === '/delete-account') p += '.html';
   const file = path.normalize(path.join(PUBLIC, p));
   if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
   fs.readFile(file, (e, data) => {

@@ -6,6 +6,7 @@ import { paintRange } from './game.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const OFFLINE_ONLY = !!window.WW_OFFLINE;
+if (!OFFLINE_ONLY && 'serviceWorker' in navigator && location.protocol !== 'file:') addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 const store = {
   get(k) { try { return localStorage.getItem('ww_' + k); } catch { return null; } },
   set(k, v) { try { if (v === null) localStorage.removeItem('ww_' + k); else localStorage.setItem('ww_' + k, v); } catch { /* storage blocked */ } },
@@ -30,6 +31,7 @@ function setConn(ok) {
   $('#conn').classList.toggle('hidden', ok || OFFLINE_ONLY || retry < 2);
   $('#online-auth').classList.toggle('hidden', OFFLINE_ONLY);
   $('#offline-note').classList.toggle('hidden', !OFFLINE_ONLY);
+  $('#legal')?.classList.toggle('hidden', OFFLINE_ONLY);
 }
 
 function onMsg(m) {
@@ -41,6 +43,7 @@ function onMsg(m) {
       if (state.pendingJoin) { send({ t: 'lobby_join', code: state.pendingJoin }); state.pendingJoin = null; }
       break;
     case 'auth_fail': state.token = null; store.set('token', null); show('auth'); break;
+    case 'deleted': state.token = null; store.set('token', null); state.user = null; $('#profile-modal').classList.add('hidden'); show('auth'); toast('Your account was deleted.'); break;
     case 'error': toast(m.msg, 'error'); authMsg(m.msg); break;
     case 'toast': toast(m.msg); break;
     case 'friends': state.friends = m; renderFriends(); break;
@@ -317,7 +320,8 @@ function renderProfile(p) {
       <h2>${esc(p.username)}</h2>${p.offline ? '<small>Saved on this device</small>' : `<small><span class="dot ${p.online ? 'on' : ''}"></span>${p.online ? 'Online' : 'Offline'}${p.created ? ' · joined ' + new Date(p.created).toLocaleDateString(undefined, { month: 'short', year: 'numeric' }) : ''}</small>`}</div>
     ${p.me ? `<div class="photo-row"><button class="btn" id="pf-cam">📷 Camera</button><button class="btn" id="pf-gal">🖼️ Gallery</button>${p.av ? '<button class="btn ghost" id="pf-rm">Remove</button>' : ''}</div>` : ''}
     <div class="prof-stats"><div><b>${g}</b><small>Games</small></div><div><b>${w}</b><small>Wins</small></div><div><b>${g ? Math.round(w / g * 100) : 0}%</b><small>Win rate</small></div>${p.friends !== undefined ? `<div><b>${p.friends}</b><small>Friends</small></div>` : ''}</div>
-    ${p.me ? `<label class="field">About me<textarea id="pf-bio" maxlength="160" rows="2" placeholder="Tell other commanders about yourself"></textarea></label><button class="btn primary xl" id="pf-save">Save profile</button>`
+    ${p.me ? `<label class="field">About me<textarea id="pf-bio" maxlength="160" rows="2" placeholder="Tell other commanders about yourself"></textarea></label><button class="btn primary xl" id="pf-save">Save profile</button>
+      ${p.offline ? '' : `<details class="danger-zone"><summary>Delete account</summary><p class="muted">This removes your account, friends, stats and photo for good.</p><input type="password" id="pf-del-pw" placeholder="Your password" autocomplete="current-password"><button class="btn danger xl" id="pf-del">Delete my account</button></details>`}`
       : `<p class="bio"></p><div class="modal-actions">${p.friend ? '<button class="btn ghost" disabled>Friends ✓</button>' : p.pending ? '<button class="btn ghost" disabled>Request sent</button>' : `<button class="btn primary" id="pf-add">${p.incoming ? 'Accept request' : 'Add friend'}</button>`}
          ${p.lobby && p.friend && p.lobby !== state.lobby?.code ? `<button class="btn go" id="pf-join">Join their room</button>` : ''}</div>`}`;
   if (p.me) {
@@ -325,6 +329,7 @@ function renderProfile(p) {
     $('#pf-save').onclick = () => { const bio = $('#pf-bio').value; if (p.offline) { store.set('bio', bio); toast('Saved'); } else send({ t: 'profile_update', bio }); };
     $('#pf-cam').onclick = () => takePhoto(p.offline);
     $('#pf-gal').onclick = () => pickFile(false, p.offline);
+    const del = $('#pf-del'); if (del) del.onclick = () => { const pw = $('#pf-del-pw').value; if (!pw) return toast('Type your password to confirm.', 'error'); send({ t: 'delete_account', password: pw }); };
     const rm = $('#pf-rm'); if (rm) rm.onclick = () => { if (p.offline) { store.set('avatar', null); openProfile(p.username); } else send({ t: 'profile_update', avatar: null }); };
   } else {
     $('.bio', $('#profile-body')).textContent = p.bio || '';

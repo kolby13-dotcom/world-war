@@ -16,6 +16,9 @@ services:
       # (for example a free Neon database) in the Render dashboard.
       - key: DATABASE_URL
         sync: false
+      # Android app link check: paste the contents of assetlinks.json from PWABuilder here.
+      - key: ASSET_LINKS
+        sync: false
     # To keep accounts and profile pictures across restarts, switch `plan` to a paid
     # plan (for example `starter`), set DATA_DIR to /var/data and uncomment this disk:
     # disk:
