@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b1020">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>World War</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="conn" class="conn hidden">Reconnecting…</div>
+<div id="toasts"></div>
+
+<!-- ============ SIGN IN ============ -->
+<section id="auth" class="screen">
+  <div class="auth-wrap">
+    <div class="brand-hero">
+      <div class="globe" aria-hidden="true"><i></i><i></i><i></i></div>
+      <h1>World War</h1>
+      <p>Grow a country. Outlast everyone.</p>
+    </div>
+    <div class="sheet">
+      <div id="online-auth">
+        <div class="seg"><button class="auth-tab active" data-m="login">Log in</button><button class="auth-tab" data-m="register">Sign up</button></div>
+        <form id="auth-form" class="stack">
+          <input id="auth-user" placeholder="Username" autocomplete="username" maxlength="16" required>
+          <input id="auth-pass" type="password" placeholder="Password" autocomplete="current-password" required>
+          <p id="auth-msg" class="msg"></p>
+          <button class="btn primary xl" id="auth-go">Log in</button>
+        </form>
+        <div class="or"><span>or</span></div>
+      </div>
+      <p id="offline-note" class="muted center hidden">This preview runs without a server, so it's you against the bots.</p>
+      <button class="btn ghost xl" id="auth-offline">Practice against bots</button>
+      <input id="offline-name" class="hidden">
+      <button class="btn link hidden-online" id="offline-profile">Edit my profile</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============ HOME ============ -->
+<section id="home" class="screen hidden">
+  <header class="home-head">
+    <button id="me-chip" class="me-chip"></button>
+    <button class="icon-btn" id="b-logout" title="Log out" aria-label="Log out"><svg viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H4"/></svg></button>
+  </header>
+  <main class="home-main">
+    <div class="tab-pane active" data-pane="play">
+      <div class="play-hero">
+        <div class="ph-text"><small>Ready, commander?</small><h2>Start a war</h2><p>Make a room and send the code to your friends. Empty seats fill with bots.</p></div>
+        <button class="btn primary xl" id="b-create">Create room</button>
+        <label class="toggle"><input type="checkbox" id="create-public" checked><span></span> List it in open rooms</label>
+      </div>
+      <form id="join-form" class="join-card">
+        <div><h3>Got a code?</h3><p class="muted">Five letters from a friend</p></div>
+        <div class="join-row"><input id="join-code" placeholder="ABCDE" maxlength="6" autocapitalize="characters" autocomplete="off"><button class="btn primary">Join</button></div>
+      </form>
+      <button class="practice-card" id="b-practice"><span class="pc-icon">🤖</span><span><b>Practice against bots</b><small>Learn the ropes, no pressure</small></span><span class="chev">›</span></button>
+      <div class="section-head"><h3>Open rooms</h3><button class="btn small ghost" id="b-refresh">Refresh</button></div>
+      <div id="lobby-list" class="list"></div>
+    </div>
+    <div class="tab-pane" data-pane="friends">
+      <h2 class="pane-title">Friends</h2>
+      <form id="friend-form" class="search"><input id="friend-name" placeholder="Add a friend by username" autocomplete="off"><button class="btn primary">Add</button></form>
+      <div id="friends-home" class="list"></div>
+    </div>
+  </main>
+  <nav class="tabbar">
+    <button class="tab active" data-tab="play"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg><span>Play</span></button>
+    <button class="tab" data-tab="friends"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.5 3.4-5.5 6.5-5.5s5.7 2 6.5 5.5M16 4.5a3.5 3.5 0 0 1 0 7M18 14.5c2 .6 3.2 2.5 3.6 5.5"/></svg><span>Friends</span><i class="badge hidden" id="friends-badge"></i></button>
+    <button class="tab" data-tab="me"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4.5 4.2-7 8-7s7 2.5 8 7"/></svg><span>Profile</span></button>
+  </nav>
+</section>
+
+<!-- ============ LOBBY ============ -->
+<section id="lobby" class="screen hidden">
+  <header class="lobby-head">
+    <button class="icon-btn" id="b-leave" aria-label="Leave room"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <div class="lh-title"><small>Room</small><b id="lobby-title">Lobby</b></div>
+    <span></span>
+  </header>
+  <main class="lobby-main">
+    <div class="code-card">
+      <small>Room code</small>
+      <div class="code" id="lobby-code"></div>
+      <div class="code-actions"><button class="btn small" id="b-copy">Copy code</button><button class="btn small" id="b-share">Share link</button></div>
+    </div>
+    <div class="lobby-cols">
+      <div class="col">
+        <div class="section-head"><h3>Players</h3><span class="muted" id="lobby-count"></span></div>
+        <div id="lobby-members" class="list"></div>
+        <div class="section-head"><h3>Your color</h3></div>
+        <div id="colors" class="colors"></div>
+      </div>
+      <div class="col">
+        <details class="fold" id="lobby-settings" open>
+          <summary><h3>Game settings</h3><span class="muted" id="settings-note"></span></summary>
+          <label class="field">Room name<input type="text" data-s="name" maxlength="40"></label>
+          <label class="field"><span>Bot fill-ins <output></output></span><input type="range" min="0" max="15" data-s="bots"></label>
+          <label class="field"><span>Max players <output></output></span><input type="range" min="2" max="16" data-s="maxPlayers"></label>
+          <label class="field"><span>Starting money <output></output></span><input type="range" min="0" max="20000" step="500" data-s="startMoney"></label>
+          <label class="field"><span>Time to pick a start <output></output></span><input type="range" min="5" max="60" step="5" data-s="spawnTime"></label>
+          <label class="field"><span>Land needed to win <output></output></span><input type="range" min="30" max="100" step="5" data-s="winPercent"></label>
+          <label class="toggle"><input type="checkbox" data-s="tribes"><span></span> Grey tribes on the map</label>
+          <label class="toggle"><input type="checkbox" data-s="public"><span></span> List in open rooms</label>
+        </details>
+        <details class="fold" open>
+          <summary><h3>Chat</h3></summary>
+          <div id="lobby-chat" class="chat-log"></div>
+          <form id="lobby-chat-form" class="search"><input id="lobby-chat-in" maxlength="200" placeholder="Say something" autocomplete="off"><button class="btn">Send</button></form>
+        </details>
+        <details class="fold">
+          <summary><h3>Invite friends</h3></summary>
+          <div id="friends-lobby" class="list"></div>
+        </details>
+      </div>
+    </div>
+  </main>
+  <footer class="action-bar">
+    <p class="muted" id="lobby-wait"></p>
+    <button class="btn xl" id="b-ready">I'm ready</button>
+    <button class="btn primary xl" id="b-start">Start game</button>
+  </footer>
+</section>
+
+<section id="game" class="screen hidden"></section>
+
+<div id="countdown" class="countdown hidden"><b>5</b><span>Get ready</span></div>
+
+<div id="practice-modal" class="modal-wrap hidden"><div class="modal">
+  <h2>Practice against bots</h2>
+  <label class="field" id="practice-name-row">Your name<input id="practice-name" maxlength="16" placeholder="Commander"></label>
+  <label class="field"><span>Bots <output id="practice-bots-v">7</output></span><input type="range" id="practice-bots" min="1" max="15" value="7"></label>
+  <div class="field">Starting money
+    <div class="chips" id="practice-money-chips">
+      <button type="button" data-v="1000" class="chip on">$1k</button><button type="button" data-v="10000" class="chip">$10k</button><button type="button" data-v="50000" class="chip">$50k</button><button type="button" data-v="300000" class="chip">$300k</button>
+    </div>
+    <input type="hidden" id="practice-money" value="1000">
+  </div>
+  <div class="modal-actions"><button class="btn ghost" id="practice-cancel">Cancel</button><button class="btn primary" id="practice-go">Start</button></div>
+</div></div>
+
+<div id="profile-modal" class="modal-wrap hidden"><div class="modal profile"><button class="icon-btn close" id="profile-close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button><div id="profile-body"></div></div></div>
+<div id="camera-modal" class="modal-wrap hidden"><div class="modal"><h2>Smile!</h2><video id="camera-video" autoplay playsinline muted></video><div class="modal-actions"><button class="btn ghost" id="camera-cancel">Cancel</button><button class="btn primary" id="camera-snap">Take picture</button></div></div></div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

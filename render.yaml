@@ -1,0 +1,20 @@
+# One-click hosting on Render (render.com): New -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: world-war
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATA_DIR
+        value: ./data
+    # To keep accounts and profile pictures across restarts, switch `plan` to a paid
+    # plan (for example `starter`), set DATA_DIR to /var/data and uncomment this disk:
+    # disk:
+    #   name: world-war-data
+    #   mountPath: /var/data
+    #   sizeGB: 1

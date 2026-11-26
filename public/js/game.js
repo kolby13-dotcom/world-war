@@ -1,0 +1,635 @@
+// Client side of a match: holds the view state, draws the map, and turns taps into actions.
+import { MAP_W as W, MAP_H as H, getLand } from '../shared/map.js';
+import { BUILDINGS, SHIP, CAPITAL, BOMBS, LEVEL_STATS as LS, UPGRADE_MULT, TICK_MS } from '../shared/rules.js';
+import { MapPainter, drawBuilding, drawDot, drawShip, drawBoat } from './render.js';
+
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + 'k' : Math.floor(n).toLocaleString();
+const FALLOUT_TICKS = { bigone: 900, hydrogen: 600, mini: 150, atomic: 350, cluster: 150 };
+const BUILD_ORDER = ['city', 'factory', 'outpost', 'port', 'battery', 'silo', 'radar', 'ship'];
+const BOMB_ORDER = ['atomic', 'cluster', 'hydrogen', 'bigone', 'emp'];
+const ICON = { capital: '🏰', city: '🏙️', factory: '🏭', port: '⚓', outpost: '🛡️', silo: '🚀', battery: '🎯', radar: '📡', ship: '🚢', atomic: '☢️', hydrogen: '💥', cluster: '🎆', bigone: '🌋', emp: '⚡' };
+const SHORT = { city: 'More people', factory: 'Most money', outpost: 'Defense + range', port: 'Boats + money', battery: 'Shoots missiles', silo: 'Launch bombs', radar: 'Better batteries', ship: 'Navy', atomic: 'Medium blast', cluster: 'Splits in 8', hydrogen: 'Huge blast', bigone: 'Biggest bomb', emp: 'Shuts buildings' };
+const SVG = {
+  trophy: '<svg viewBox="0 0 24 24"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4"/></svg>',
+  chat: '<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>',
+  menu: '<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>',
+  x: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+};
+
+export class ClientGame {
+  constructor({ root, you, snap, username, send, onExit, onChat, offline, myId }) {
+    this.myId = myId; this.root = root; this.you = you; this.username = username; this.send = send; this.onExit = onExit; this.offline = offline; this.onChatCb = onChat;
+    this.land = getLand();
+    this.landCount = this.land.reduce((a, b) => a + b, 0);
+    this.owner = new Int16Array(W * H).fill(-1);
+    this.painter = new MapPainter();
+    this.info = snap.pi; this.painter.setPlayers(this.info);
+    for (let k = 0; k < snap.own.length; k += 2) this.owner[snap.own[k]] = snap.own[k + 1];
+    for (let k = 0; k < snap.fo.length; k += 2) this.painter.fallout.set(snap.fo[k], snap.fo[k + 1]);
+    this.painter.setOwner(this.owner);
+    this.supply = new Uint8Array(W * H);
+    this.supplyCanvas = document.createElement('canvas'); this.supplyCanvas.width = W; this.supplyCanvas.height = H;
+    this.buildings = []; this.setBuildings(snap.bl);
+    this.stats = []; this.boats = []; this.ships = []; this.missiles = []; this.attacks = [];
+    this.phase = snap.phase; this.tick = snap.tick; this.spawnLeft = 0;
+    this.effects = []; this.shake = 0;
+    this.mode = { kind: 'attack' }; this.ratio = 0.3; this.selected = null;
+    this.prev = { ms: new Map(), boats: new Map(), ships: new Map() }; this.lastPatchAt = performance.now();
+    this.named = false; this.supplyHintAt = 0;
+    this.buildDom();
+    this.canvas = $('canvas', this.root); this.ctx = this.canvas.getContext('2d');
+    this.cam = { x: W / 2, y: H / 2, s: 2 };
+    this.resize(); this.fitWorld();
+    this.bindInput();
+    this.running = true; requestAnimationFrame(() => this.frame());
+    this._resize = () => this.resize(); window.addEventListener('resize', this._resize);
+  }
+
+  destroy() {
+    this.running = false; window.removeEventListener('resize', this._resize); window.removeEventListener('keydown', this._key);
+    this.root.innerHTML = '';
+    try { if (document.fullscreenElement) document.exitFullscreen(); } catch { /* not in fullscreen */ }
+  }
+
+  // ---------- DOM ----------
+  buildDom() {
+    this.root.innerHTML = `
+    <canvas class="map"></canvas>
+    <div class="hud hud-tl">
+      <div class="statusbar glass">
+        <span class="flag"></span><span class="sb-name"><b class="n-name"></b><small class="n-sub"></small></span>
+        <i class="sep"></i>
+        <span class="sb-stat" title="People"><em>👥</em><span><b class="s-troops">0</b><span class="bar"><i class="s-bar"></i></span></span></span>
+        <i class="sep"></i>
+        <span class="sb-stat money" title="Money"><em>💰</em><span><b class="s-money">0</b><small class="s-inc"></small></span></span>
+      </div>
+    </div>
+    <div class="hud hud-tr">
+      <button class="icon-btn b-lb" title="Leaderboard" aria-label="Leaderboard">${SVG.trophy}</button>
+      <button class="icon-btn b-chat" title="Chat" aria-label="Chat">${SVG.chat}</button>
+      <button class="icon-btn b-menu" title="Menu" aria-label="Menu">${SVG.menu}</button>
+    </div>
+    <div class="hud banner spawn hidden"></div>
+    <div class="hud alarm hidden"><span class="al-text"></span><button class="btn small al-btn">Fight back</button></div>
+    <div class="hud side-panel glass leaderboard hidden"></div>
+    <div class="hud side-panel glass chat-panel hidden"><h4>Chat</h4><div class="chat-log"></div><form class="chat-form"><input maxlength="200" placeholder="Say something" aria-label="Chat message"><button class="btn small primary">Send</button></form>
+      <div class="emotes">${['😂', '😡', '🤝', '💀', '👋', 'gg'].map(e => `<button type="button" data-e="${e}">${e}</button>`).join('')}</div></div>
+    <div class="hud feed"></div>
+    <div class="hud mode-pill hidden"><span></span><button class="btn small primary">Done</button></div>
+    <div class="hud inspector glass hidden"></div>
+    <div class="hud hud-bl">
+      <div class="sender glass" role="group" aria-label="How many people to send">
+        <span class="sender-label">Send<b class="ratio-n"></b></span>
+        <div class="quick">${[10, 25, 50, 75, 100].map(v => `<button data-q="${v}">${v}%</button>`).join('')}</div>
+      </div>
+    </div>
+    <div class="hud hud-br">
+      <button class="dock-btn b-build" aria-label="Build"><span class="di">🏗️</span><span>Build</span></button>
+      <button class="dock-btn bombs b-bomb" aria-label="Bombs"><span class="di">🚀</span><span>Bombs</span></button>
+    </div>
+    <div class="hud strip glass hidden"></div>
+    <div class="modal-wrap hidden name-modal"><div class="modal"><div class="prof-top"><span class="flag-big"></span><h2>Name your country</h2><p class="muted">Everyone will see this on the map.</p></div>
+      <input class="country-in" maxlength="32" aria-label="Country name"><div class="modal-actions"><button class="btn ghost b-name-no">No thanks</button><button class="btn primary b-name-ok">Start here</button></div></div></div>
+    <div class="modal-wrap hidden menu-modal"><div class="modal"><h2>Paused?</h2><p class="muted">The war keeps going while this is open.</p>
+      <button class="btn xl b-close">Back to the map</button><button class="btn ghost xl b-help">How to play</button><button class="btn ghost xl b-rename">Rename country</button><button class="btn ghost xl b-leave">Leave game</button><button class="btn danger xl b-surrender">Surrender</button></div></div>
+    <div class="modal-wrap hidden help-modal"><div class="modal"><h2>How to play</h2><div class="help-list">
+      <div><span class="ci">👆</span><p><b>Expand</b>Tap empty land next to you. The slider sets how many people go. More people means a faster push.</p></div>
+      <div><span class="ci">🏰</span><p><b>Supply range</b>Land near your capital, cities, outposts and ports is quick and cheap to take. Past that it costs 3 times as many people. Build at your edges to keep growing.</p></div>
+      <div><span class="ci">⚔️</span><p><b>Invade and defend</b>Tap a neighbour to invade. When someone invades you, hit Fight back. Your counter-attack troops count 1.5 times.</p></div>
+      <div><span class="ci">⛵</span><p><b>Islands</b>Tap land across the water and a boat sails your troops there. Ports make boats faster.</p></div>
+      <div><span class="ci">🏙️</span><p><b>Buildings</b>Cities add people, factories add the most money, outposts make land hard to take. Tap a building to upgrade it to level 3.</p></div>
+      <div><span class="ci">🚀</span><p><b>Bombs</b>Build a Missile Silo, then use Bombs. Batteries shoot missiles down and radars make them better.</p></div>
+      <div><span class="ci">🏆</span><p><b>Win</b>Own the target share of the world's land, or be the last country standing.</p></div>
+      </div><button class="btn primary xl b-help-close">Got it</button></div></div>
+    <div class="modal-wrap hidden over-modal"><div class="modal over"></div></div>
+    <div class="rotate"><div class="phone"></div><h2>Turn your phone sideways</h2><p>The map needs the room. Rotate to landscape to play.</p><button class="btn primary b-rot">Go full screen</button></div>`;
+    const r = this.root;
+    const setRatio = (v) => { this.ratio = v / 100; for (const b of r.querySelectorAll('.quick button')) b.classList.toggle('on', +b.dataset.q === +v); this.updateHud(); };
+    for (const b of r.querySelectorAll('.quick button')) b.onclick = () => setRatio(+b.dataset.q);
+    setRatio(25);
+    $('.b-build', r).onclick = () => this.openStrip('build');
+    $('.b-bomb', r).onclick = () => this.openStrip('bomb');
+    $('.b-lb', r).onclick = () => this.togglePanel('leaderboard');
+    $('.b-chat', r).onclick = () => { this.togglePanel('chat-panel'); $('.b-chat', r).querySelector('.dot-badge')?.remove(); };
+    $('.b-menu', r).onclick = () => $('.menu-modal', r).classList.remove('hidden');
+    $('.b-close', r).onclick = () => $('.menu-modal', r).classList.add('hidden');
+    $('.b-help', r).onclick = () => { $('.menu-modal', r).classList.add('hidden'); $('.help-modal', r).classList.remove('hidden'); };
+    $('.b-help-close', r).onclick = () => $('.help-modal', r).classList.add('hidden');
+    $('.b-surrender', r).onclick = (e) => {
+      const btn = e.currentTarget;
+      if (!btn.dataset.armed) { btn.dataset.armed = '1'; btn.textContent = 'Tap again to surrender'; setTimeout(() => { delete btn.dataset.armed; btn.textContent = 'Surrender'; }, 3000); return; }
+      this.send({ type: 'surrender' }); $('.menu-modal', r).classList.add('hidden');
+    };
+    $('.b-leave', r).onclick = () => this.onExit();
+    $('.b-rename', r).onclick = () => { $('.menu-modal', r).classList.add('hidden'); this.askName(null); };
+    $('.mode-pill button', r).onclick = () => this.setMode({ kind: 'attack' });
+    $('.b-name-ok', r).onclick = () => this.confirmName(false);
+    $('.b-name-no', r).onclick = () => this.confirmName(true);
+    $('.country-in', r).onkeydown = (e) => { if (e.key === 'Enter') this.confirmName(false); };
+    $('.chat-form', r).onsubmit = (e) => { e.preventDefault(); const i = $('input', e.target); if (i.value.trim()) this.onChatCb?.(i.value.trim()); i.value = ''; };
+    for (const b of r.querySelectorAll('.emotes button')) b.onclick = () => this.onChatCb?.(b.dataset.e);
+    $('.al-btn', r).onclick = () => this.fightBack();
+    $('.b-rot', r).onclick = () => this.goLandscape();
+    if (this.offline) $('.b-chat', r).style.display = 'none';
+  }
+
+  togglePanel(cls) {
+    for (const p of this.root.querySelectorAll('.side-panel')) { const on = p.classList.contains(cls) && p.classList.contains('hidden'); p.classList.toggle('hidden', !on); }
+    $('.b-lb', this.root).classList.toggle('on', !$('.leaderboard', this.root).classList.contains('hidden'));
+    $('.b-chat', this.root).classList.toggle('on', !$('.chat-panel', this.root).classList.contains('hidden'));
+    this.updateHud();
+  }
+
+  goLandscape() {
+    const el = document.documentElement;
+    const lock = () => { try { screen.orientation?.lock?.('landscape').catch(() => {}); } catch { /* unsupported */ } };
+    try {
+      if (!document.fullscreenElement && el.requestFullscreen) el.requestFullscreen({ navigationUI: 'hide' }).then(lock, () => {});
+      else lock();
+    } catch { /* fullscreen not allowed here */ }
+  }
+
+  me() { return this.stats[this.you]; }
+
+  openStrip(kind) {
+    const strip = $('.strip', this.root);
+    const open = strip.classList.contains('hidden') || strip.dataset.kind !== kind;
+    strip.classList.toggle('hidden', !open); strip.dataset.kind = kind;
+    $('.b-build', this.root).classList.toggle('on', open && kind === 'build');
+    $('.b-bomb', this.root).classList.toggle('on', open && kind === 'bomb');
+    if (open) { this.select(null); strip._html = ''; this.renderStrip(); }
+  }
+  closeStrip() { $('.strip', this.root).classList.add('hidden'); $('.b-build', this.root).classList.remove('on'); $('.b-bomb', this.root).classList.remove('on'); }
+  renderStrip() {
+    const strip = $('.strip', this.root); if (strip.classList.contains('hidden')) return;
+    const money = this.me()?.money || 0;
+    const silo = Math.max(0, ...this.buildings.filter(b => b.owner === this.you && b.type === 'silo').map(b => b.level));
+    let html = '';
+    if (strip.dataset.kind === 'build') {
+      html = BUILD_ORDER.map(t => {
+        const def = t === 'ship' ? SHIP : BUILDINGS[t];
+        const count = t === 'ship' ? this.ships.filter(s => s.o === this.you).length : this.buildings.filter(b => b.owner === this.you && b.type === t).length;
+        const cost = Math.round(def.cost * (1 + 0.3 * count));
+        return `<button class="card-btn ${money < cost ? 'poor' : ''}" data-b="${t}"><span class="ci">${ICON[t]}</span><b>${def.name.replace('Missile ', '')}</b><span>$${fmt(cost)}</span><small>${SHORT[t]}</small></button>`;
+      }).join('');
+    } else {
+      html = BOMB_ORDER.map(t => {
+        const d = BOMBS[t]; const locked = silo < d.silo;
+        return `<button class="card-btn ${money < d.cost ? 'poor' : ''} ${locked ? 'locked' : ''}" data-m="${t}"><span class="ci">${ICON[t]}</span><b>${d.name}</b><span>$${fmt(d.cost)}</span><small>${locked ? (silo ? `Silo level ${d.silo}` : 'Needs a silo') : SHORT[t]}</small></button>`;
+      }).join('');
+    }
+    if (strip._html !== html) {
+      const sl = strip.scrollLeft; strip.innerHTML = html; strip._html = html; strip.scrollLeft = sl;
+      for (const b of strip.querySelectorAll('[data-b]')) b.onclick = () => { this.setMode({ kind: 'build', what: b.dataset.b }); this.closeStrip(); };
+      for (const b of strip.querySelectorAll('[data-m]')) b.onclick = () => {
+        if (b.classList.contains('locked')) return this.toast(silo ? `${BOMBS[b.dataset.m].name} needs a level ${BOMBS[b.dataset.m].silo} silo. Tap your silo to upgrade it.` : 'Build a Missile Silo first.', 'error');
+        this.setMode({ kind: 'bomb', what: b.dataset.m }); this.closeStrip();
+      };
+    }
+  }
+  setMode(m) {
+    this.mode = m;
+    const pill = $('.mode-pill', this.root);
+    if (m.kind === 'attack') { pill.classList.add('hidden'); return; }
+    let label = '';
+    if (m.kind === 'build') label = m.what === 'ship' ? `${ICON.ship} Tap near one of your ports` : `${ICON[m.what]} Tap your land to place a ${BUILDINGS[m.what].name}`;
+    if (m.kind === 'bomb') label = `${ICON[m.what]} Tap a target for the ${BOMBS[m.what].name}`;
+    if (m.kind === 'ship') label = `${ICON.ship} Tap the water to sail there`;
+    $('span', pill).textContent = label; $('button', pill).textContent = 'Cancel'; pill.classList.remove('hidden');
+  }
+
+  askName(tile) {
+    this.pendingSpawn = tile;
+    const inp = $('.country-in', this.root);
+    const cur = this.info[this.you]?.country;
+    inp.value = this.named && cur ? cur : ''; inp.placeholder = `${this.username}'s Country`;
+    const f = $('.flag-big', this.root); f.style.cssText = `width:64px;height:64px;border-radius:20px;background:${this.info[this.you]?.color};box-shadow:inset 0 -6px 0 rgba(0,0,0,.2)`;
+    $('.name-modal', this.root).classList.remove('hidden');
+    setTimeout(() => inp.focus(), 60);
+  }
+  confirmName(skip) {
+    const v = skip ? `${this.username}'s Country` : ($('.country-in', this.root).value.trim() || `${this.username}'s Country`);
+    $('.name-modal', this.root).classList.add('hidden');
+    this.named = true;
+    if (this.pendingSpawn !== null && this.pendingSpawn !== undefined && this.phase === 'spawn') this.send({ type: 'spawn', tile: this.pendingSpawn, country: v });
+    else this.send({ type: 'rename', country: v });
+    this.pendingSpawn = null;
+  }
+
+  toast(text, kind = 'info') {
+    const feed = $('.feed', this.root);
+    if (feed.firstChild && feed.firstChild.textContent === text) return; // don't stack duplicates
+    const el = document.createElement('div'); el.className = 'toast ' + kind; el.textContent = text;
+    feed.prepend(el); while (feed.children.length > 2) feed.lastChild.remove();
+    setTimeout(() => el.classList.add('fade'), 3200); setTimeout(() => el.remove(), 3800);
+  }
+  chat(entry) {
+    const log = $('.chat-panel .chat-log', this.root);
+    const el = document.createElement('div'); el.innerHTML = '<b></b> <span></span>'; el.querySelector('b').textContent = entry.from + ':'; el.querySelector('span').textContent = entry.text;
+    log.append(el); log.scrollTop = 1e9;
+    if ($('.chat-panel', this.root).classList.contains('hidden')) {
+      const btn = $('.b-chat', this.root); if (!btn.querySelector('.dot-badge')) btn.insertAdjacentHTML('beforeend', '<i class="dot-badge"></i>');
+      this.toast(`${entry.from}: ${entry.text}`, 'chat');
+    }
+  }
+
+  // ---------- state ----------
+  setBuildings(bl) {
+    this.buildings = bl;
+    // supply mask for my own country (same rule as the server)
+    this.supply.fill(0); this.supplySources = [];
+    for (const b of bl) {
+      if (b.owner !== this.you || b.dis) continue;
+      const r = b.type === 'capital' ? CAPITAL.supply : LS[b.type]?.supply?.[b.level]; if (!r) continue;
+      this.supplySources.push({ x: b.x + 0.5, y: b.y + 0.5, r: r + 0.5 });
+      const R = Math.ceil(r);
+      for (let dy = -R; dy <= R; dy++) { const y = b.y + dy; if (y < 0 || y >= H) continue;
+        for (let dx = -R; dx <= R; dx++) { const x = b.x + dx; if (x < 0 || x >= W || dx * dx + dy * dy > r * r) continue; this.supply[y * W + x] = 1; } }
+    }
+    const ctx = this.supplyCanvas.getContext('2d'), img = ctx.createImageData(W, H), d = new Uint32Array(img.data.buffer);
+    for (let i = 0; i < W * H; i++) {
+      if (!this.supply[i]) continue; const x = i % W;
+      const edge = (x > 0 && !this.supply[i - 1]) || (x < W - 1 && !this.supply[i + 1]) || (i >= W && !this.supply[i - W]) || (i < W * H - W && !this.supply[i + W]);
+      if (!edge && this.land[i]) d[i] = 0x10ffffff;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  applyPatch(p) {
+    const dt = p.tick - this.tick; this.tick = p.tick;
+    if (p.pi) { this.info = p.pi; this.painter.setPlayers(this.info); this.painter.setOwner(this.owner); }
+    const ch = p.ch;
+    for (let k = 0; k < ch.length; k += 2) this.owner[ch[k]] = ch[k + 1];
+    for (let k = 0; k < ch.length; k += 2) this.painter.repaintAround(ch[k]);
+    if (this.painter.fallout.size && dt > 0) {
+      for (const [i, t] of this.painter.fallout) { if (t <= dt) { this.painter.fallout.delete(i); this.painter.paint(i); } else this.painter.fallout.set(i, t - dt); }
+    }
+    this.stats = p.ps;
+    if (p.bl) { this.setBuildings(p.bl); if (this.selected && this.selected.kind === 'b' && !this.buildings.find(b => b.id === this.selected.id)) this.select(null); }
+    this.prev = { ms: new Map(this.missiles.map(m => [m.id, m])), boats: new Map(this.boats.map(b => [b.id, b])), ships: new Map(this.ships.map(s => [s.id, s])) };
+    this.boats = p.boats; this.ships = p.ships; this.attacks = p.atk; this.missiles = p.ms; this.lastPatchAt = performance.now();
+    if (this.selected && this.selected.kind === 's' && !this.ships.find(s => s.id === this.selected.id)) { this.select(null); if (this.mode.kind === 'ship') this.setMode({ kind: 'attack' }); }
+    const prevPhase = this.phase; this.phase = p.phase; this.spawnLeft = p.spawnLeft;
+    if (prevPhase === 'spawn' && p.phase === 'play') {
+      this.named = true; $('.name-modal', this.root).classList.add('hidden');
+      const me = this.me(); if (me && me.cx >= 0) this.flyTo(me.cx, me.cy, Math.max(this.cam.s, Math.min(this.vw, this.vh) / 60));
+    }
+    for (const e of p.ev) this.onEvent(e);
+    this.updateHud();
+  }
+  flyTo(x, y, s) { this.fly = { x0: this.cam.x, y0: this.cam.y, s0: this.cam.s, x, y, s: s || this.cam.s, t0: performance.now() }; }
+
+  onEvent(e) {
+    if (e.to && this.myId && e.to !== this.myId) return;
+    const now = performance.now();
+    if (e.k === 'msg') this.toast(e.text, e.kind);
+    else if (e.k === 'boom') {
+      this.effects.push({ k: 'boom', x: e.x + 0.5, y: e.y + 0.5, r: e.r, type: e.type, t0: now, dur: e.type === 'bigone' ? 3200 : e.r > 5 ? 1800 : 700 });
+      if (e.r >= 5) this.shake = Math.max(this.shake, e.type === 'bigone' ? 22 : e.r);
+      if (e.type === 'bigone') this.effects.push({ k: 'flash', t0: now, dur: 900 });
+      if (FALLOUT_TICKS[e.type]) {
+        const R = Math.ceil(e.r);
+        for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+          if (dx * dx + dy * dy > e.r * e.r) continue; const x = e.x + dx, y = e.y + dy; if (x < 0 || x >= W || y < 0 || y >= H) continue;
+          const i = y * W + x; if (this.land[i]) { this.painter.fallout.set(i, FALLOUT_TICKS[e.type]); this.painter.paint(i); }
+        }
+      }
+    } else if (e.k === 'shot') this.effects.push({ k: 'line', x1: e.x1 + 0.5, y1: e.y1 + 0.5, x2: e.x2 + 0.5, y2: e.y2 + 0.5, t0: now, dur: 300, c: '#ffdd55' });
+    else if (e.k === 'icpt') this.effects.push({ k: 'line', x1: e.bx + 0.5, y1: e.by + 0.5, x2: e.x + 0.5, y2: e.y + 0.5, t0: now, dur: 400, c: e.hit ? '#7cf' : 'rgba(150,200,255,0.5)' });
+    else if (e.k === 'over') this.showOver(e);
+  }
+  showOver(e) {
+    const win = this.info[e.winner]; const meWon = e.winner === this.you;
+    const box = $('.over', this.root);
+    box.innerHTML = `<div class="over-hero"><span class="big">${meWon ? '🏆' : '🏳️'}</span><h2>${meWon ? 'You conquered the world!' : 'Game over'}</h2><p class="muted winner"></p></div>
+      <div style="overflow-x:auto"><table><tr><th>#</th><th>Country</th><th>Peak land</th><th>Bombed</th><th>Bombs</th></tr>
+      ${e.ranking.map((r, i) => `<tr class="${r.idx === this.you ? 'me' : ''}"><td>${i + 1}</td><td><i style="background:${this.info[r.idx].color}"></i>${esc(r.country)}</td><td>${r.peak}</td><td>${r.kills}</td><td>${r.bombs}</td></tr>`).join('')}</table></div>
+      <button class="btn primary xl b-over">${this.offline ? 'Back to menu' : 'Back to the room'}</button><button class="btn ghost xl b-over-stay">Look at the map</button>`;
+    $('.winner', box).textContent = `${win.country} (${win.name}) won.`;
+    $('.b-over', box).onclick = () => this.onExit();
+    $('.b-over-stay', box).onclick = () => { $('.over-modal', this.root).classList.add('hidden'); const lb = $('.b-menu', this.root); lb.onclick = () => this.onExit(); lb.innerHTML = SVG.x; };
+    $('.over-modal', this.root).classList.remove('hidden');
+  }
+
+  updateHud() {
+    const r = this.root, me = this.me(), info = this.info[this.you];
+    if (me && info) {
+      $('.flag', r).style.background = info.color;
+      $('.n-name', r).textContent = info.country;
+      $('.n-sub', r).textContent = me.alive ? `${(me.tiles / this.landCount * 100).toFixed(1)}% of the world` : 'Fallen';
+      $('.s-troops', r).textContent = fmt(me.troops);
+      $('.s-bar', r).style.width = Math.min(100, me.troops / Math.max(1, me.max) * 100) + '%';
+      $('.s-money', r).textContent = '$' + fmt(me.money); $('.s-inc', r).textContent = `+${fmt(me.inc)}/s`;
+      $('.ratio-n', r).textContent = fmt(me.troops * this.ratio);
+    }
+    const banner = $('.banner', r);
+    if (this.phase === 'spawn') {
+      banner.classList.remove('hidden');
+      banner.textContent = me && me.tiles ? `Starting in ${this.spawnLeft}s · tap again to move` : `Tap the map to pick your start · ${this.spawnLeft}s`;
+    } else banner.classList.add('hidden');
+    // invasion alarm
+    const alarm = $('.alarm', r);
+    const incoming = this.attacks.filter(a => a.t === this.you && a.a !== this.you).sort((a, b) => b.n - a.n)[0];
+    const missile = this.missiles.find(m => m.o !== this.you && this.owner[Math.round(m.ty) * W + Math.round(m.tx)] === this.you);
+    if (this.phase === 'play' && (incoming || missile) && this.mode.kind === 'attack') {
+      alarm.classList.remove('hidden'); alarm.classList.toggle('missile', !!missile);
+      this.incoming = incoming;
+      $('.al-text', alarm).textContent = missile ? `☢️ Missile incoming from ${this.info[missile.o].country}!` : `⚔️ ${this.info[incoming.a].country} is invading with ${fmt(incoming.n)}`;
+      $('.al-btn', alarm).classList.toggle('hidden', !incoming);
+    } else alarm.classList.add('hidden');
+    // leaderboard
+    const lb = $('.leaderboard', r);
+    if (!lb.classList.contains('hidden')) {
+      const rows = this.stats.map((s, i) => ({ s, i })).filter(o => o.s.alive && !this.info[o.i]?.tribe).sort((a, b) => b.s.tiles - a.s.tiles).slice(0, 10);
+      lb.innerHTML = '<h4>Leaderboard</h4>' + rows.map((o, k) => `<div class="lb-row ${o.i === this.you ? 'me' : ''}"><span class="rk">${k + 1}</span><i style="background:${this.info[o.i].color}"></i><span class="nm">${esc(this.info[o.i].country)}</span><b>${(o.s.tiles / this.landCount * 100).toFixed(1)}%</b></div>`).join('');
+    }
+    this.renderStrip();
+    if (this.selected) this.renderInspector();
+  }
+
+  fightBack() {
+    const a = this.incoming; if (!a) return;
+    // send troops at the attacker's land that touches ours, nearest to their push
+    let best = -1;
+    for (let i = 0; i < W * H; i++) {
+      if (this.owner[i] !== a.a) continue; const x = i % W;
+      if ((x > 0 && this.owner[i - 1] === this.you) || (x < W - 1 && this.owner[i + 1] === this.you) || this.owner[i - W] === this.you || this.owner[i + W] === this.you) { best = i; if (Math.random() < 0.02) break; }
+    }
+    if (best < 0) return this.toast('Their troops came by sea. Hold on, or hit their land directly.', 'info');
+    const ratio = Math.max(this.ratio, Math.min(0.8, (a.n / Math.max(1, this.me().troops)) * 0.9));
+    this.send({ type: 'attack', tile: best, ratio });
+    this.effects.push({ k: 'ping', x: best % W + 0.5, y: ((best / W) | 0) + 0.5, t0: performance.now(), dur: 600 });
+  }
+
+  // ---------- inspector ----------
+  select(sel) {
+    this.selected = sel;
+    const panel = $('.inspector', this.root);
+    $('.hud-bl', this.root).classList.toggle('hidden', !!sel && this.vh < 560);
+    if (!sel) { panel.classList.add('hidden'); return; }
+    this.closeStrip();
+    panel.classList.remove('hidden'); panel._key = ''; this.renderInspector();
+  }
+  renderInspector() {
+    const panel = $('.inspector', this.root), sel = this.selected;
+    const obj = sel.kind === 'b' ? this.buildings.find(b => b.id === sel.id) : this.ships.find(s => s.id === sel.id);
+    if (!obj) return this.select(null);
+    const type = sel.kind === 'b' ? obj.type : 'ship';
+    const ownerIdx = obj.owner ?? obj.o, mine = ownerIdx === this.you;
+    const name = type === 'ship' ? SHIP.name : type === 'capital' ? CAPITAL.name : BUILDINGS[type].name;
+    const cost = obj.level < 3 && type !== 'capital' ? Math.round((type === 'ship' ? SHIP.cost : BUILDINGS[type].cost) * UPGRADE_MULT[obj.level + 1]) : 0;
+    const money = this.me()?.money || 0;
+    const key = `${obj.id}:${obj.level}:${mine}:${obj.dis}:${money >= cost}:${obj.hp}`;
+    if (panel._key === key) return; panel._key = key;
+    const owner = this.info[ownerIdx];
+    panel.innerHTML = `<div class="insp-head"><span class="ci">${ICON[type]}</span><div><b>${name}</b><small></small></div><button class="icon-btn ins-x" aria-label="Close">${SVG.x}</button></div>
+      ${type === 'capital' ? '' : `<div class="lv">${[1, 2, 3].map(l => `<i class="${l <= obj.level ? 'on' : ''}"></i>`).join('')}</div>`}
+      <div class="insp-stat">${statLine(type, obj.level)}${obj.dis ? ' · <span class="bad">knocked out by EMP</span>' : ''}</div>
+      ${mine && cost ? `<div class="insp-next">Level ${obj.level + 1}: ${statLine(type, obj.level + 1)}</div><button class="btn ${money >= cost ? 'go' : ''} ins-up" ${money < cost ? 'disabled' : ''}>Upgrade · $${fmt(cost)}</button>` : ''}
+      ${mine && type === 'ship' ? '<button class="btn ins-move">Sail somewhere</button>' : ''}`;
+    $('small', panel).textContent = (type === 'capital' ? '' : `Level ${obj.level} · `) + (owner ? owner.country : '');
+    $('.ins-x', panel).onclick = () => { this.select(null); if (this.mode.kind === 'ship') this.setMode({ kind: 'attack' }); };
+    const up = $('.ins-up', panel); if (up) up.onclick = () => this.send({ type: 'upgrade', id: obj.id });
+    const mv = $('.ins-move', panel); if (mv) mv.onclick = () => this.setMode({ kind: 'ship', id: obj.id });
+  }
+
+  // ---------- input ----------
+  bindInput() {
+    const c = this.canvas; const pts = new Map(); let drag = null, pinch = null, moved = 0, downAt = 0;
+    c.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'touch' && !this._triedLandscape) { this._triedLandscape = true; this.goLandscape(); }
+      c.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); this.fly = null;
+      if (pts.size === 1) { drag = { x: e.clientX, y: e.clientY, cx: this.cam.x, cy: this.cam.y }; moved = 0; downAt = performance.now(); }
+      if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), s: this.cam.s }; moved = 99; }
+    });
+    c.addEventListener('pointermove', (e) => {
+      this.hover = this.screenToWorld(e.clientX, e.clientY);
+      if (!pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2 && pinch) {
+        const [a, b] = [...pts.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y);
+        this.zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, (pinch.s * d / pinch.d) / this.cam.s);
+      } else if (drag) {
+        const dx = e.clientX - drag.x, dy = e.clientY - drag.y; moved = Math.max(moved, Math.hypot(dx, dy));
+        if (moved > 8) { this.cam.x = drag.cx - dx / this.cam.s; this.cam.y = drag.cy - dy / this.cam.s; this.clampCam(); }
+      }
+    });
+    const up = (e) => {
+      const wasTap = pts.size === 1 && moved <= 8 && performance.now() - downAt < 600;
+      pts.delete(e.pointerId);
+      if (pts.size < 2) pinch = null;
+      if (pts.size === 1) { const [p] = [...pts.values()]; drag = { x: p.x, y: p.y, cx: this.cam.x, cy: this.cam.y }; }
+      if (!pts.size) drag = null;
+      if (wasTap && e.type === 'pointerup') this.tap(e.clientX, e.clientY);
+    };
+    c.addEventListener('pointerup', up); c.addEventListener('pointercancel', up);
+    c.addEventListener('wheel', (e) => { e.preventDefault(); this.fly = null; this.zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0015)); }, { passive: false });
+    c.addEventListener('contextmenu', (e) => e.preventDefault());
+    this._key = (e) => { if (e.key === 'Escape') { this.setMode({ kind: 'attack' }); this.select(null); this.closeStrip(); } };
+    window.addEventListener('keydown', this._key);
+  }
+  screenToWorld(sx, sy) { const r = this.canvas.getBoundingClientRect(); return { x: (sx - r.left - this.vw / 2) / this.cam.s + this.cam.x, y: (sy - r.top - this.vh / 2) / this.cam.s + this.cam.y }; }
+  zoomAt(sx, sy, f) {
+    const before = this.screenToWorld(sx, sy);
+    this.cam.s = Math.min(48, Math.max(this.minScale, this.cam.s * f));
+    const after = this.screenToWorld(sx, sy);
+    this.cam.x += before.x - after.x; this.cam.y += before.y - after.y; this.clampCam();
+  }
+  clampCam() { this.cam.x = Math.max(0, Math.min(W, this.cam.x)); this.cam.y = Math.max(0, Math.min(H, this.cam.y)); }
+  resize() {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.vw = this.root.clientWidth; this.vh = this.root.clientHeight; this.dpr = dpr;
+    this.canvas.width = this.vw * dpr; this.canvas.height = this.vh * dpr;
+    this.minScale = Math.min(this.vw / W, this.vh / H) * 0.9;
+    if (this.cam.s < this.minScale) this.cam.s = this.minScale;
+    const touch = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+    $('.rotate', this.root)?.classList.toggle('show', touch && this.vh > this.vw && this.vw < 820);
+  }
+  fitWorld() { this.cam.s = Math.max(this.minScale, Math.min(this.vw / W, this.vh / H) * 1.15); this.cam.x = W / 2; this.cam.y = H / 2 - 4; }
+  centerOn(x, y, s) { this.cam.x = x; this.cam.y = y; if (s) this.cam.s = Math.max(this.cam.s, s); this.clampCam(); }
+
+  tap(sx, sy) {
+    const w = this.screenToWorld(sx, sy); const x = Math.floor(w.x), y = Math.floor(w.y);
+    if (x < 0 || x >= W || y < 0 || y >= H) return;
+    const tile = y * W + x;
+    if (!$('.strip', this.root).classList.contains('hidden')) { this.closeStrip(); return; }
+    for (const p of this.root.querySelectorAll('.side-panel:not(.hidden)')) { p.classList.add('hidden'); $('.b-lb', this.root).classList.remove('on'); $('.b-chat', this.root).classList.remove('on'); }
+    if (this.phase === 'spawn') {
+      if (!this.land[tile]) return this.toast('Pick a spot on land.', 'error');
+      if (!this.named) this.askName(tile); else this.send({ type: 'spawn', tile });
+      return;
+    }
+    if (this.phase !== 'play') return;
+    const m = this.mode;
+    if (m.kind === 'build') {
+      this.send({ type: 'build', what: m.what, tile });
+      this.effects.push({ k: 'ping', x: w.x, y: w.y, t0: performance.now(), dur: 500 });
+      this.setMode({ kind: 'attack' }); return;
+    }
+    if (m.kind === 'bomb') { this.send({ type: 'bomb', what: m.what, tile }); this.setMode({ kind: 'attack' }); return; }
+    if (m.kind === 'ship') { this.send({ type: 'moveShip', id: m.id, tile }); this.toast('Setting sail'); this.setMode({ kind: 'attack' }); return; }
+    // pick a building or ship under the finger
+    const rad = Math.max(1.6, 22 / this.cam.s);
+    let best = null, bd = rad * rad;
+    for (const s of this.ships) { const d = (s.x + 0.5 - w.x) ** 2 + (s.y + 0.5 - w.y) ** 2; if (d < bd) { bd = d; best = { kind: 's', id: s.id, o: s.o }; } }
+    for (const b of this.buildings) { const d = (b.x + 0.5 - w.x) ** 2 + (b.y + 0.5 - w.y) ** 2; if (d < bd) { bd = d; best = { kind: 'b', id: b.id, o: b.owner }; } }
+    if (best && best.o === this.you) {
+      this.select(best);
+      if (best.kind === 's') this.setMode({ kind: 'ship', id: best.id });
+      return;
+    }
+    if (this.selected) { this.select(null); return; }
+    if (!this.land[tile] || this.owner[tile] === this.you) return;
+    this.send({ type: 'attack', tile, ratio: this.ratio });
+    this.effects.push({ k: 'ping', x: w.x, y: w.y, t0: performance.now(), dur: 500 });
+    let nearMe = false;
+    for (let dy = -2; dy <= 2 && !nearMe; dy++) for (let dx = -2; dx <= 2; dx++) { const t = (y + dy) * W + x + dx; if (t >= 0 && t < W * H && this.owner[t] === this.you) { nearMe = true; break; } }
+    if (nearMe && this.owner[tile] === -1 && !this.supply[tile] && performance.now() - this.supplyHintAt > 20000) {
+      this.supplyHintAt = performance.now(); this.supplyFlash = performance.now();
+      this.toast('That land is outside your supply range, so it costs 3x the people. Build a City or Outpost near your border.', 'warn');
+    }
+  }
+
+  // ---------- drawing ----------
+  frame() {
+    if (!this.running) return;
+    requestAnimationFrame(() => this.frame());
+    const ctx = this.ctx, now = performance.now(), s0 = this.cam.s, dpr = this.dpr;
+    if (this.fly) {
+      const t = Math.min(1, (now - this.fly.t0) / 900), e = 1 - (1 - t) ** 3;
+      this.cam.x = this.fly.x0 + (this.fly.x - this.fly.x0) * e; this.cam.y = this.fly.y0 + (this.fly.y - this.fly.y0) * e; this.cam.s = this.fly.s0 + (this.fly.s - this.fly.s0) * e;
+      if (t >= 1) this.fly = null;
+    }
+    const s = this.cam.s; void s0;
+    this.painter.flush();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#07101f'; ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    let shx = 0, shy = 0; if (this.shake > 0.2) { shx = (Math.random() - 0.5) * this.shake; shy = (Math.random() - 0.5) * this.shake; this.shake *= 0.92; }
+    ctx.setTransform(s * dpr, 0, 0, s * dpr, (this.vw / 2 - this.cam.x * s + shx) * dpr, (this.vh / 2 - this.cam.y * s + shy) * dpr);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.painter.canvas, 0, 0);
+    const px = 1 / s; // one screen pixel in world units
+
+    // supply range: always faint, bright while building or right after a hint
+    const showSupply = this.mode.kind === 'build' || (this.supplyFlash && now - this.supplyFlash < 4000);
+    ctx.globalAlpha = showSupply ? 0.7 : 0.25; ctx.drawImage(this.supplyCanvas, 0, 0); ctx.globalAlpha = 1;
+    // outline of the supply area: the outer edge of the union of all supply circles
+    const src = this.supplySources || [];
+    ctx.strokeStyle = showSupply ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.45)'; ctx.lineWidth = (showSupply ? 2.5 : 1.5) * px;
+    ctx.setLineDash([6 * px, 5 * px]); ctx.lineDashOffset = -now / 60 * px;
+    ctx.beginPath();
+    for (const a of src) {
+      const n = Math.max(48, Math.ceil(a.r * 6)); let pen = false;
+      for (let k = 0; k <= n; k++) {
+        const t = k / n * Math.PI * 2, x = a.x + Math.cos(t) * a.r, y = a.y + Math.sin(t) * a.r;
+        const inside = src.some(b => b !== a && (x - b.x) ** 2 + (y - b.y) ** 2 < b.r * b.r - 0.01);
+        if (inside) { pen = false; continue; }
+        if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; }
+      }
+    }
+    ctx.stroke(); ctx.setLineDash([]);
+
+    if (this.selected) {
+      const o = this.selected.kind === 'b' ? this.buildings.find(b => b.id === this.selected.id) : this.ships.find(b => b.id === this.selected.id);
+      const type = this.selected.kind === 'b' ? o?.type : 'ship';
+      const r = o && (type === 'ship' ? LS.ship.range[o.level] : LS[type]?.radius?.[o.level]);
+      if (r) { ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.setLineDash([5 * px, 5 * px]); ctx.lineWidth = 2 * px; ctx.beginPath(); ctx.arc(o.x + 0.5, o.y + 0.5, r, 0, 7); ctx.stroke(); ctx.setLineDash([]); }
+    }
+    if (this.mode.kind === 'bomb' && this.hover) {
+      const r = BOMBS[this.mode.what].radius * (this.mode.what === 'cluster' ? 4 : 1);
+      ctx.fillStyle = 'rgba(255,60,30,0.18)'; ctx.strokeStyle = 'rgba(255,80,40,0.9)'; ctx.lineWidth = 2 * px;
+      ctx.beginPath(); ctx.arc(this.hover.x, this.hover.y, r, 0, 7); ctx.fill(); ctx.stroke();
+    }
+    if (this.mode.kind === 'build') {
+      for (const b of this.buildings) if (b.owner === this.you && LS[b.type]?.radius && b.type === this.mode.what) { ctx.strokeStyle = 'rgba(120,200,255,0.6)'; ctx.lineWidth = 1.5 * px; ctx.beginPath(); ctx.arc(b.x + 0.5, b.y + 0.5, LS[b.type].radius[b.level], 0, 7); ctx.stroke(); }
+      if (this.hover) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2 * px; ctx.beginPath(); ctx.arc(Math.floor(this.hover.x) + 0.5, Math.floor(this.hover.y) + 0.5, Math.max(1.3, 14 * px), 0, 7); ctx.stroke(); }
+    }
+
+    // country names
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    this.stats.forEach((st, i) => {
+      if (!st.alive || st.tiles < 4 || st.cx < 0) return;
+      const inf = this.info[i]; if (!inf) return;
+      if (inf.tribe) {
+        if (s < 3.5) return;
+        ctx.font = `800 ${11 * px}px Nunito, system-ui, sans-serif`; ctx.lineJoin = 'round'; ctx.lineWidth = 3 * px; ctx.strokeStyle = 'rgba(8,12,24,0.6)'; ctx.fillStyle = '#d5d9e2';
+        ctx.strokeText(inf.country, st.cx + 0.5, st.cy + 0.5); ctx.fillText(inf.country, st.cx + 0.5, st.cy + 0.5); return;
+      }
+      const fs = Math.max(10 * px, Math.min(Math.sqrt(st.tiles) * 0.45, 22 * px));
+      ctx.font = `900 ${fs}px Nunito, system-ui, sans-serif`;
+      ctx.lineJoin = 'round'; ctx.lineWidth = fs * 0.22; ctx.strokeStyle = 'rgba(8,12,24,0.75)'; ctx.fillStyle = '#fff';
+      ctx.strokeText(inf.country, st.cx + 0.5, st.cy + 0.5); ctx.fillText(inf.country, st.cx + 0.5, st.cy + 0.5);
+      ctx.font = `800 ${fs * 0.62}px Nunito, system-ui, sans-serif`;
+      const line = fmt(st.troops);
+      ctx.lineWidth = fs * 0.16; ctx.strokeText(line, st.cx + 0.5, st.cy + 0.5 + fs * 0.85); ctx.fillText(line, st.cx + 0.5, st.cy + 0.5 + fs * 0.85);
+    });
+
+    // buildings: big round pins when zoomed in, small dots when far out
+    const f = Math.min(1, (now - this.lastPatchAt) / TICK_MS);
+    if (s < 2.2) { for (const b of this.buildings) drawDot(ctx, b, this.info[b.owner]?.color || '#888', 5 * px); }
+    else { const size = Math.min(48 * px, Math.max(26 * px, 2.4)); for (const b of this.buildings) drawBuilding(ctx, b, this.info[b.owner]?.color || '#888', b.owner === this.you || b.type === 'capital' ? size : size * 0.8, b.owner === this.you); }
+    const lerp = (cur, prev) => prev ? { ...cur, x: prev.x + (cur.x - prev.x) * f, y: prev.y + (cur.y - prev.y) * f } : cur;
+    for (const sh of this.ships) drawShip(ctx, lerp(sh, this.prev.ships.get(sh.id)), this.info[sh.o]?.color || '#888', Math.min(60 * px, Math.max(32 * px, 2.8)), now);
+    for (const bt0 of this.boats) {
+      const bt = lerp(bt0, this.prev.boats.get(bt0.id)); const size = Math.min(40 * px, Math.max(24 * px, 1.8));
+      drawBoat(ctx, bt, this.info[bt.o]?.color || '#888', size, now);
+      const label = fmt(bt.n); ctx.font = `900 ${11 * px}px Nunito, system-ui`;
+      const tw = ctx.measureText(label).width + 10 * px, lx = bt.x + 0.5, ly = bt.y + 0.5 - size * 0.85;
+      ctx.fillStyle = this.info[bt.o]?.color || '#888'; ctx.beginPath(); ctx.roundRect(lx - tw / 2, ly - 8 * px, tw, 16 * px, 8 * px); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,.5)'; ctx.lineWidth = 2.5 * px; ctx.strokeText(label, lx, ly + px); ctx.fillText(label, lx, ly + px);
+    }
+
+    // missiles (interpolated between server ticks)
+    for (const m of this.missiles) {
+      const prev = this.prev.ms.get(m.id); const p0 = prev ? prev.p : m.p; const p = p0 + (m.p - p0) * f;
+      const dist = Math.hypot(m.tx - m.fx, m.ty - m.fy), hgt = Math.min(40, dist * 0.35) * (m.type === 'mini' ? 0.2 : 1);
+      const pos = (q) => [m.fx + (m.tx - m.fx) * q + 0.5, m.fy + (m.ty - m.fy) * q + 0.5 - Math.sin(Math.PI * q) * hgt];
+      ctx.strokeStyle = m.o === this.you ? 'rgba(255,255,255,0.35)' : 'rgba(255,80,60,0.5)'; ctx.lineWidth = 1.5 * px; ctx.setLineDash([3 * px, 3 * px]);
+      ctx.beginPath(); for (let q = p; q <= 1.0001; q += 0.04) { const [x, y] = pos(Math.min(1, q)); ctx.lineTo(x, y); } ctx.stroke(); ctx.setLineDash([]);
+      ctx.strokeStyle = 'rgba(255,230,200,0.85)'; ctx.lineWidth = 2.5 * px; ctx.beginPath(); for (let q = Math.max(0, p - 0.12); q <= p; q += 0.02) { const [x, y] = pos(q); ctx.lineTo(x, y); } ctx.stroke();
+      const [x, y] = pos(p); const big = m.type === 'bigone' ? 9 : m.type === 'hydrogen' ? 7 : m.type === 'mini' ? 3 : 5;
+      ctx.fillStyle = m.type === 'emp' ? '#7cf' : m.type === 'bigone' ? '#ff3b1f' : '#fff'; ctx.beginPath(); ctx.arc(x, y, big * px, 0, 7); ctx.fill();
+      ctx.strokeStyle = this.info[m.o]?.color || '#f00'; ctx.lineWidth = 2 * px; ctx.stroke();
+      if (m.o !== this.you && m.type !== 'mini') { ctx.strokeStyle = 'rgba(255,40,40,0.85)'; ctx.lineWidth = 2 * px; const r = (m.type === 'cluster' ? 12 : BOMBS[m.type].radius); ctx.beginPath(); ctx.arc(m.tx + 0.5, m.ty + 0.5, r, 0, 7); ctx.stroke(); }
+    }
+
+    // effects
+    this.effects = this.effects.filter(e => now - e.t0 < e.dur);
+    for (const e of this.effects) {
+      const t = (now - e.t0) / e.dur;
+      if (e.k === 'boom') {
+        const r = e.r * (0.3 + 0.9 * Math.sqrt(t));
+        const g = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, Math.max(0.1, r));
+        const a = 1 - t;
+        if (e.type === 'emp') { g.addColorStop(0, `rgba(160,230,255,${a})`); g.addColorStop(1, 'rgba(80,160,255,0)'); }
+        else { g.addColorStop(0, `rgba(255,255,220,${a})`); g.addColorStop(0.35, `rgba(255,170,40,${a * 0.9})`); g.addColorStop(0.75, `rgba(200,40,20,${a * 0.6})`); g.addColorStop(1, 'rgba(60,20,10,0)'); }
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, 7); ctx.fill();
+        if (e.r >= 7) { ctx.strokeStyle = `rgba(255,255,255,${(1 - t) * 0.7})`; ctx.lineWidth = 2 * px; ctx.beginPath(); ctx.arc(e.x, e.y, e.r * (0.5 + t * 1.6), 0, 7); ctx.stroke(); }
+      } else if (e.k === 'line') { ctx.strokeStyle = e.c; ctx.globalAlpha = 1 - t; ctx.lineWidth = 2 * px; ctx.beginPath(); ctx.moveTo(e.x1, e.y1); ctx.lineTo(e.x2, e.y2); ctx.stroke(); ctx.globalAlpha = 1; }
+      else if (e.k === 'ping') { ctx.strokeStyle = `rgba(255,255,255,${1 - t})`; ctx.lineWidth = 3 * px; ctx.beginPath(); ctx.arc(e.x, e.y, (6 + t * 16) * px, 0, 7); ctx.stroke(); }
+    }
+    const flash = this.effects.find(e => e.k === 'flash');
+    if (flash) { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = `rgba(255,250,230,${0.85 * (1 - (now - flash.t0) / flash.dur)})`; ctx.fillRect(0, 0, this.canvas.width, this.canvas.height); }
+  }
+}
+
+function paintRange(el) { const p = (el.value - el.min) / (el.max - el.min) * 100; el.style.setProperty('--p', p + '%'); }
+
+function statLine(type, lv) {
+  const S = LS[type];
+  switch (type) {
+    case 'capital': return `+${fmt(CAPITAL.maxTroops)} max people, +${CAPITAL.growth} growth, supply range ${CAPITAL.supply}. Lose it and it's gone for good.`;
+    case 'city': return `+${fmt(S.maxTroops[lv])} max people, +${S.growth[lv]}/s growth, +$${S.money[lv]}/s, supply ${S.supply[lv]}`;
+    case 'factory': return `+$${S.money[lv]}/s`;
+    case 'port': return `+$${S.money[lv]}/s, faster boats, supply ${S.supply[lv]}`;
+    case 'outpost': return `Land within ${S.radius[lv]} is ${S.defense[lv]}x harder to take, supply ${S.supply[lv]}`;
+    case 'silo': return `Reloads in ${S.cooldown[lv] / 10}s · ${Object.values(BOMBS).filter(b => b.silo === lv).map(b => b.name).join(', ')} unlocked`;
+    case 'battery': return `Range ${S.radius[lv]} · ${Math.round(S.chance[lv] * 100)}% hit · reload ${S.cooldown[lv] / 10}s`;
+    case 'radar': return `Batteries within ${S.radius[lv]} get +${Math.round(S.boost[lv] * 100)}% hit chance`;
+    case 'ship': return `HP ${S.hp[lv]} · range ${S.range[lv]} · damage ${S.damage[lv]}`;
+  }
+  return '';
+}
+export { paintRange };
