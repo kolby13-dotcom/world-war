@@ -3,6 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { Engine } from '../public/shared/engine.js';
@@ -382,12 +383,27 @@ const server = http.createServer((req, res) => {
   if (p === '/privacy' || p === '/delete-account') p += '.html';
   const file = path.normalize(path.join(PUBLIC, p));
   if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
-  fs.readFile(file, (e, data) => {
-    if (e) { res.writeHead(404); return res.end('Not found'); }
-    res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
-    res.end(data);
-  });
+  serveStatic(req, res, file);
 });
+// Static files are read once, gzipped once, and served with an ETag so repeat visits are a quick 304.
+const fileCache = new Map();
+function serveStatic(req, res, file) {
+  const send = (f) => {
+    if (!f) { res.writeHead(404); return res.end('Not found'); }
+    const headers = { 'Content-Type': f.type, 'Cache-Control': 'no-cache', ETag: f.etag, Vary: 'Accept-Encoding' };
+    if (req.headers['if-none-match'] === f.etag) { res.writeHead(304, headers); return res.end(); }
+    if (f.gz && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) { res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' }); return res.end(f.gz); }
+    res.writeHead(200, headers); res.end(f.data);
+  };
+  if (fileCache.has(file)) return send(fileCache.get(file));
+  fs.readFile(file, (e, data) => {
+    if (e) return send(null);
+    const type = TYPES[path.extname(file)] || 'application/octet-stream';
+    const f = { data, type, etag: '"' + crypto.createHash('sha1').update(data).digest('base64').slice(0, 16) + '"',
+      gz: /text|javascript|json|svg|manifest/.test(type) && data.length > 1024 ? zlib.gzipSync(data, { level: 9 }) : null };
+    fileCache.set(file, f); send(f);
+  });
+}
 const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 1024 * 1024 });
 wss.on('connection', (ws) => {
   ws.on('message', (data) => { let msg; try { msg = JSON.parse(data); } catch { return; } try { handle(ws, msg); } catch (e) { console.error(e); } });

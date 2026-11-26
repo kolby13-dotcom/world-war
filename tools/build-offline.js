@@ -11,6 +11,7 @@ const css = fs.readFileSync(path.join(root, 'public/style.css'), 'utf8');
 let html = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
 html = html.replace('<link rel="stylesheet" href="/style.css">', () => `<style>${css}</style>`);
 html = html.replace('<script type="module" src="/js/app.js"></script>', () => `<script>window.WW_OFFLINE = true;</script><script>${js}</script>`);
+html = html.replace(/<link rel="(modulepreload|manifest|icon|apple-touch-icon)"[^>]*>\s*/g, '');
 fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
 fs.writeFileSync(path.join(root, 'dist/world-war-offline.html'), html);
 console.log('wrote dist/world-war-offline.html', (html.length / 1024).toFixed(0) + ' KB');
