@@ -51,4 +51,11 @@ export const ECON = {
   maxBoats: 4,
 };
 
+// Bot difficulty. think: ticks between decisions. eco: growth and income multiplier.
+export const BOT_LEVELS = {
+  easy:   { name: 'Easy',   think: 2.0, eco: 0.8,  fight: 0.35, bombs: 0,   aggr: 0.6, accept: 0.85, betray: 0 },
+  medium: { name: 'Medium', think: 1.0, eco: 1.0,  fight: 0.75, bombs: 1,   aggr: 1.0, accept: 0.55, betray: 0.002 },
+  hard:   { name: 'Hard',   think: 0.6, eco: 1.25, fight: 1.0,  bombs: 1.6, aggr: 1.4, accept: 0.35, betray: 0.006 },
+};
+
 export const COLORS = ['#e6194b','#3cb44b','#ffe119','#4363d8','#f58231','#911eb4','#46f0f0','#f032e6','#bcf60c','#fabebe','#008080','#e6beff','#9a6324','#fffac8','#800000','#aaffc3','#808000','#ffd8b1','#000075','#808080'];

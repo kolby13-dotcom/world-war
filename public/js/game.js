@@ -7,8 +7,8 @@ const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + 'k' : Math.floor(n).toLocaleString();
 const FALLOUT_TICKS = { bigone: 900, hydrogen: 600, mini: 150, atomic: 350, cluster: 150 };
-const BUILD_ORDER = ['city', 'factory', 'outpost', 'port', 'battery', 'silo', 'radar', 'ship'];
-const BOMB_ORDER = ['atomic', 'cluster', 'hydrogen', 'bigone', 'emp'];
+const BUILD_TYPES = ['city', 'factory', 'outpost', 'port', 'battery', 'silo', 'radar', 'ship'];
+const BOMB_ORDER = Object.keys(BOMBS).sort((a, b) => BOMBS[a].cost - BOMBS[b].cost);
 const ICON = { capital: '🏰', city: '🏙️', factory: '🏭', port: '⚓', outpost: '🛡️', silo: '🚀', battery: '🎯', radar: '📡', ship: '🚢', atomic: '☢️', hydrogen: '💥', cluster: '🎆', bigone: '🌋', emp: '⚡' };
 const SHORT = { city: 'More people', factory: 'Most money', outpost: 'Defense + range', port: 'Boats + money', battery: 'Shoots missiles', silo: 'Launch bombs', radar: 'Better batteries', ship: 'Navy', atomic: 'Medium blast', cluster: 'Splits in 8', hydrogen: 'Huge blast', bigone: 'Biggest bomb', emp: 'Shuts buildings' };
 const SVG = {
@@ -16,6 +16,7 @@ const SVG = {
   chat: '<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>',
   menu: '<svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg>',
   x: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  flag: '<svg viewBox="0 0 24 24"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>',
 };
 
 export class ClientGame {
@@ -37,7 +38,8 @@ export class ClientGame {
     this.effects = []; this.shake = 0;
     this.mode = { kind: 'attack' }; this.ratio = 0.3; this.selected = null;
     this.prev = { ms: new Map(), boats: new Map(), ships: new Map() }; this.lastPatchAt = performance.now();
-    this.named = false; this.supplyHintAt = 0;
+    this.named = false; this.supplyHintAt = 0; this.toastSeen = new Map();
+    this.setDiplomacy(snap.dip || { al: [], rq: [] });
     this.buildDom();
     this.canvas = $('canvas', this.root); this.ctx = this.canvas.getContext('2d');
     this.cam = { x: W / 2, y: H / 2, s: 2 };
@@ -67,12 +69,13 @@ export class ClientGame {
       </div>
     </div>
     <div class="hud hud-tr">
-      <button class="icon-btn b-lb" title="Leaderboard" aria-label="Leaderboard">${SVG.trophy}</button>
+      <button class="icon-btn b-lb" title="Countries and alliances" aria-label="Countries and alliances">${SVG.flag}</button>
       <button class="icon-btn b-chat" title="Chat" aria-label="Chat">${SVG.chat}</button>
       <button class="icon-btn b-menu" title="Menu" aria-label="Menu">${SVG.menu}</button>
     </div>
     <div class="hud banner spawn hidden"></div>
     <div class="hud alarm hidden"><span class="al-text"></span><button class="btn small al-btn">Fight back</button></div>
+    <div class="hud offers"></div>
     <div class="hud side-panel glass leaderboard hidden"></div>
     <div class="hud side-panel glass chat-panel hidden"><h4>Chat</h4><div class="chat-log"></div><form class="chat-form"><input maxlength="200" placeholder="Say something" aria-label="Chat message"><button class="btn small primary">Send</button></form>
       <div class="emotes">${['😂', '😡', '🤝', '💀', '👋', 'gg'].map(e => `<button type="button" data-e="${e}">${e}</button>`).join('')}</div></div>
@@ -97,11 +100,12 @@ export class ClientGame {
     <div class="modal-wrap hidden help-modal"><div class="modal"><h2>How to play</h2><div class="help-list">
       <div><span class="ci">👆</span><p><b>Expand</b>Tap empty land next to you. The slider sets how many people go. More people means a faster push.</p></div>
       <div><span class="ci">🏰</span><p><b>Supply range</b>Land near your capital, cities, outposts and ports is quick and cheap to take. Past that it costs 3 times as many people. Build at your edges to keep growing.</p></div>
-      <div><span class="ci">⚔️</span><p><b>Invade and defend</b>Tap a neighbour to invade. When someone invades you, hit Fight back. Your counter-attack troops count 1.5 times.</p></div>
+      <div><span class="ci">⚔️</span><p><b>Invade and defend</b>Tap a neighbour to invade. When someone invades you, hit Fight back. Counter-attacks hit harder and move faster, and land you just lost is cheap to take back. Lose your capital and half your people scatter.</p></div>
+      <div><span class="ci">🤝</span><p><b>Alliances</b>Open the flag panel to ask a country to be allies. Allies can't invade or shell each other, and tapping an ally's land sends them people. You can betray an ally, but they'll fight harder against you for a while.</p></div>
       <div><span class="ci">⛵</span><p><b>Islands</b>Tap land across the water and a boat sails your troops there. Ports make boats faster.</p></div>
       <div><span class="ci">🏙️</span><p><b>Buildings</b>Cities add people, factories add the most money, outposts make land hard to take. Tap a building to upgrade it to level 3.</p></div>
       <div><span class="ci">🚀</span><p><b>Bombs</b>Build a Missile Silo, then use Bombs. Batteries shoot missiles down and radars make them better.</p></div>
-      <div><span class="ci">🏆</span><p><b>Win</b>Own the target share of the world's land, or be the last country standing.</p></div>
+      <div><span class="ci">🏆</span><p><b>Win</b>Own the target share of the world's land, or be the last country standing. If everyone left is allied and together owns enough land, the alliance wins.</p></div>
       </div><button class="btn primary xl b-help-close">Got it</button></div></div>
     <div class="modal-wrap hidden over-modal"><div class="modal over"></div></div>
     <div class="rotate"><div class="phone"></div><h2>Turn your phone sideways</h2><p>The map needs the room. Rotate to landscape to play.</p><button class="btn primary b-rot">Go full screen</button></div>`;
@@ -168,10 +172,13 @@ export class ClientGame {
     const silo = Math.max(0, ...this.buildings.filter(b => b.owner === this.you && b.type === 'silo').map(b => b.level));
     let html = '';
     if (strip.dataset.kind === 'build') {
-      html = BUILD_ORDER.map(t => {
+      // cheapest first, using what each one costs you right now
+      const items = BUILD_TYPES.map(t => {
         const def = t === 'ship' ? SHIP : BUILDINGS[t];
         const count = t === 'ship' ? this.ships.filter(s => s.o === this.you).length : this.buildings.filter(b => b.owner === this.you && b.type === t).length;
-        const cost = Math.round(def.cost * (1 + 0.3 * count));
+        return { t, def, cost: Math.round(def.cost * (1 + 0.3 * count)) };
+      }).sort((a, b) => a.cost - b.cost || a.def.cost - b.def.cost);
+      html = items.map(({ t, def, cost }) => {
         return `<button class="card-btn ${money < cost ? 'poor' : ''}" data-b="${t}"><span class="ci">${ICON[t]}</span><b>${def.name.replace('Missile ', '')}</b><span>$${fmt(cost)}</span><small>${SHORT[t]}</small></button>`;
       }).join('');
     } else {
@@ -219,11 +226,16 @@ export class ClientGame {
   }
 
   toast(text, kind = 'info') {
-    const feed = $('.feed', this.root);
-    if (feed.firstChild && feed.firstChild.textContent === text) return; // don't stack duplicates
+    const feed = $('.feed', this.root), now = performance.now();
+    // the same note at most once every 8 seconds, and never two of the same on screen
+    if (now - (this.toastSeen.get(text) || -1e9) < 8000) return;
+    this.toastSeen.set(text, now); if (this.toastSeen.size > 200) this.toastSeen.clear();
+    // only one toast at a time on small screens, two on bigger ones
+    const max = this.vh < 500 ? 1 : 2;
     const el = document.createElement('div'); el.className = 'toast ' + kind; el.textContent = text;
-    feed.prepend(el); while (feed.children.length > 2) feed.lastChild.remove();
-    setTimeout(() => el.classList.add('fade'), 3200); setTimeout(() => el.remove(), 3800);
+    feed.prepend(el); while (feed.children.length > max) feed.lastChild.remove();
+    const life = kind === 'error' ? 2600 : 3200;
+    setTimeout(() => el.classList.add('fade'), life); setTimeout(() => el.remove(), life + 500);
   }
   chat(entry) {
     const log = $('.chat-panel .chat-log', this.root);
@@ -257,9 +269,26 @@ export class ClientGame {
     ctx.putImageData(img, 0, 0);
   }
 
+  setDiplomacy(d) {
+    this.allies = new Set(); this.sentReq = new Set(); this.gotReq = new Set();
+    for (const [a, b] of d.al) { if (a === this.you) this.allies.add(b); else if (b === this.you) this.allies.add(a); }
+    for (const [f, t] of d.rq) { if (f === this.you) this.sentReq.add(t); else if (t === this.you) this.gotReq.add(f); }
+    this.renderOffers();
+  }
+  isAlly(i) { return this.allies?.has(i); }
+  renderOffers() {
+    const box = $('.offers', this.root); if (!box) return;
+    const key = [...this.gotReq].join(',');
+    if (box._key === key) return; box._key = key;
+    box.innerHTML = [...this.gotReq].slice(0, 2).map(f => `<div class="offer glass"><i style="background:${this.info[f]?.color}"></i><span><b></b> wants to be allies</span><button class="btn small ghost" data-no="${f}">No</button><button class="btn small go" data-yes="${f}">Ally</button></div>`).join('');
+    box.querySelectorAll('.offer b').forEach((b, k) => { b.textContent = this.info[[...this.gotReq][k]]?.country || ''; });
+    for (const b of box.querySelectorAll('[data-yes]')) b.onclick = () => this.send({ type: 'allyAnswer', from: +b.dataset.yes, yes: true });
+    for (const b of box.querySelectorAll('[data-no]')) b.onclick = () => this.send({ type: 'allyAnswer', from: +b.dataset.no, yes: false });
+  }
   applyPatch(p) {
     const dt = p.tick - this.tick; this.tick = p.tick;
     if (p.pi) { this.info = p.pi; this.painter.setPlayers(this.info); this.painter.setOwner(this.owner); }
+    if (p.dip) { this.setDiplomacy(p.dip); this.lbKey = ''; }
     const ch = p.ch;
     for (let k = 0; k < ch.length; k += 2) this.owner[ch[k]] = ch[k + 1];
     for (let k = 0; k < ch.length; k += 2) this.painter.repaintAround(ch[k]);
@@ -299,13 +328,17 @@ export class ClientGame {
     } else if (e.k === 'shot') this.effects.push({ k: 'line', x1: e.x1 + 0.5, y1: e.y1 + 0.5, x2: e.x2 + 0.5, y2: e.y2 + 0.5, t0: now, dur: 300, c: '#ffdd55' });
     else if (e.k === 'icpt') this.effects.push({ k: 'line', x1: e.bx + 0.5, y1: e.by + 0.5, x2: e.x + 0.5, y2: e.y + 0.5, t0: now, dur: 400, c: e.hit ? '#7cf' : 'rgba(150,200,255,0.5)' });
     else if (e.k === 'over') this.showOver(e);
+    else if (e.k === 'give') { const a = this.stats[e.a], b = this.stats[e.t]; if (a && b && a.cx >= 0 && b.cx >= 0) this.effects.push({ k: 'give', x1: a.cx + 0.5, y1: a.cy + 0.5, x2: b.cx + 0.5, y2: b.cy + 0.5, c: this.info[e.a]?.color || '#fff', t0: now, dur: 1400 }); }
+    else if (e.k === 'betray' && (e.t === this.you)) this.shake = Math.max(this.shake, 6);
   }
   showOver(e) {
     const win = this.info[e.winner]; const meWon = e.winner === this.you;
     const box = $('.over', this.root);
-    box.innerHTML = `<div class="over-hero"><span class="big">${meWon ? '🏆' : '🏳️'}</span><h2>${meWon ? 'You conquered the world!' : 'Game over'}</h2><p class="muted winner"></p></div>
+    const inTeam = !meWon && e.team?.includes(this.you);
+    box.innerHTML = `<div class="over-hero"><span class="big">${meWon ? '🏆' : inTeam ? '🤝' : '🏳️'}</span><h2>${meWon ? 'You conquered the world!' : inTeam ? 'Your alliance won!' : 'Game over'}</h2><p class="muted winner"></p></div>
       <div style="overflow-x:auto"><table><tr><th>#</th><th>Country</th><th>Peak land</th><th>Bombed</th><th>Bombs</th></tr>
       ${e.ranking.map((r, i) => `<tr class="${r.idx === this.you ? 'me' : ''}"><td>${i + 1}</td><td><i style="background:${this.info[r.idx].color}"></i>${esc(r.country)}</td><td>${r.peak}</td><td>${r.kills}</td><td>${r.bombs}</td></tr>`).join('')}</table></div>
+      ${e.team && e.team.length > 1 ? `<p class="muted center">Alliance victory: ${e.team.map(i => esc(this.info[i].country)).join(', ')}</p>` : ''}
       <button class="btn primary xl b-over">${this.offline ? 'Back to menu' : 'Back to the room'}</button><button class="btn ghost xl b-over-stay">Look at the map</button>`;
     $('.winner', box).textContent = `${win.country} (${win.name}) won.`;
     $('.b-over', box).onclick = () => this.onExit();
@@ -331,22 +364,55 @@ export class ClientGame {
     } else banner.classList.add('hidden');
     // invasion alarm
     const alarm = $('.alarm', r);
-    const incoming = this.attacks.filter(a => a.t === this.you && a.a !== this.you).sort((a, b) => b.n - a.n)[0];
-    const missile = this.missiles.find(m => m.o !== this.you && this.owner[Math.round(m.ty) * W + Math.round(m.tx)] === this.you);
-    if (this.phase === 'play' && (incoming || missile) && this.mode.kind === 'attack') {
-      alarm.classList.remove('hidden'); alarm.classList.toggle('missile', !!missile);
+    // one calm line for every attack on you: the biggest attacker, plus how many others
+    const all = this.attacks.filter(a => a.t === this.you && a.a !== this.you && !this.info[a.a]?.tribe).sort((a, b) => b.n - a.n);
+    const tribeHits = this.attacks.filter(a => a.t === this.you && this.info[a.a]?.tribe);
+    const incoming = all[0] || tribeHits[0];
+    const missiles = this.missiles.filter(m => m.o !== this.you && m.type !== 'mini' && this.owner[Math.round(m.ty) * W + Math.round(m.tx)] === this.you);
+    if (this.phase === 'play' && (incoming || missiles.length) && this.mode.kind === 'attack') {
+      alarm.classList.remove('hidden'); alarm.classList.toggle('missile', !!missiles.length);
       this.incoming = incoming;
-      $('.al-text', alarm).textContent = missile ? `☢️ Missile incoming from ${this.info[missile.o].country}!` : `⚔️ ${this.info[incoming.a].country} is invading with ${fmt(incoming.n)}`;
+      let text;
+      if (missiles.length) text = `☢️ ${missiles.length > 1 ? missiles.length + ' missiles' : 'Missile'} incoming from ${this.info[missiles[0].o].country}`;
+      else {
+        const total = all.concat(tribeHits).reduce((s, a) => s + a.n, 0), others = all.length + tribeHits.length - 1;
+        text = `⚔️ ${this.info[incoming.a].country}${others > 0 ? ` +${others}` : ''} · ${fmt(total)} invading`;
+      }
+      const t = $('.al-text', alarm); if (t.textContent !== text) t.textContent = text;
       $('.al-btn', alarm).classList.toggle('hidden', !incoming);
     } else alarm.classList.add('hidden');
     // leaderboard
     const lb = $('.leaderboard', r);
-    if (!lb.classList.contains('hidden')) {
-      const rows = this.stats.map((s, i) => ({ s, i })).filter(o => o.s.alive && !this.info[o.i]?.tribe).sort((a, b) => b.s.tiles - a.s.tiles).slice(0, 10);
-      lb.innerHTML = '<h4>Leaderboard</h4>' + rows.map((o, k) => `<div class="lb-row ${o.i === this.you ? 'me' : ''}"><span class="rk">${k + 1}</span><i style="background:${this.info[o.i].color}"></i><span class="nm">${esc(this.info[o.i].country)}</span><b>${(o.s.tiles / this.landCount * 100).toFixed(1)}%</b></div>`).join('');
-    }
+    if (!lb.classList.contains('hidden')) this.renderCountries(lb);
     this.renderStrip();
     if (this.selected) this.renderInspector();
+  }
+
+  // Countries panel: ranking plus alliance actions
+  renderCountries(lb) {
+    const rows = this.stats.map((s, i) => ({ s, i })).filter(o => o.s.alive && !this.info[o.i]?.tribe).sort((a, b) => Math.round(b.s.tiles / 50) - Math.round(a.s.tiles / 50) || a.i - b.i);
+    const live = this.phase === 'play' && this.me()?.alive;
+    const pct = (o) => (o.s.tiles / this.landCount * 100).toFixed(1) + '%';
+    // rebuild only when the order or alliances change, so buttons stay put under your finger
+    const key = rows.map(o => o.i).join('|') + '/' + [...this.allies].join() + '/' + [...this.sentReq].join() + '/' + [...this.gotReq].join() + live;
+    if (lb._key === key && this.lbKey !== '') { rows.forEach((o) => { const el = lb.querySelector(`[data-pct="${o.i}"]`); if (el && el.textContent !== pct(o)) el.textContent = pct(o); }); return; }
+    lb._key = key; this.lbKey = key;
+    const act = (i) => {
+      if (i === this.you || !live) return '';
+      if (this.isAlly(i)) return `<button class="mini-btn give" data-give="${i}" title="Send people">👥 Send</button><button class="mini-btn bad" data-betray="${i}" title="Betray">🗡️</button>`;
+      if (this.sentReq.has(i)) return '<span class="mini-note">Asked…</span>';
+      if (this.gotReq.has(i)) return `<button class="mini-btn go" data-accept="${i}">Accept</button>`;
+      return `<button class="mini-btn" data-ally="${i}">🤝 Ally</button>`;
+    };
+    lb.innerHTML = '<h4>Countries</h4>' + rows.map((o, k) => `<div class="lb-row ${o.i === this.you ? 'me' : ''} ${this.isAlly(o.i) ? 'ally' : ''}"><span class="rk">${k + 1}</span><i style="background:${this.info[o.i].color}"></i><span class="nm">${esc(this.info[o.i].country)}<small data-pct="${o.i}">${pct(o)}</small></span>${act(o.i)}</div>`).join('')
+      + (live ? '<p class="lb-tip">Allies can\'t invade or shell each other. Tap an ally\'s land to send people.</p>' : '');
+    for (const b of lb.querySelectorAll('[data-ally]')) b.onclick = () => this.send({ type: 'ally', to: +b.dataset.ally });
+    for (const b of lb.querySelectorAll('[data-accept]')) b.onclick = () => this.send({ type: 'allyAnswer', from: +b.dataset.accept, yes: true });
+    for (const b of lb.querySelectorAll('[data-give]')) b.onclick = () => this.send({ type: 'give', to: +b.dataset.give, ratio: this.ratio });
+    for (const b of lb.querySelectorAll('[data-betray]')) b.onclick = () => {
+      if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Sure?'; setTimeout(() => { delete b.dataset.armed; b.textContent = '🗡️'; }, 2500); return; }
+      this.send({ type: 'betray', to: +b.dataset.betray });
+    };
   }
 
   fightBack() {
@@ -482,6 +548,10 @@ export class ClientGame {
     }
     if (this.selected) { this.select(null); return; }
     if (!this.land[tile] || this.owner[tile] === this.you) return;
+    if (this.isAlly(this.owner[tile])) {
+      this.send({ type: 'give', to: this.owner[tile], ratio: this.ratio });
+      this.effects.push({ k: 'ping', x: w.x, y: w.y, t0: performance.now(), dur: 500 }); return;
+    }
     this.send({ type: 'attack', tile, ratio: this.ratio });
     this.effects.push({ k: 'ping', x: w.x, y: w.y, t0: performance.now(), dur: 500 });
     let nearMe = false;
@@ -560,7 +630,8 @@ export class ClientGame {
       const fs = Math.max(10 * px, Math.min(Math.sqrt(st.tiles) * 0.45, 22 * px));
       ctx.font = `900 ${fs}px Nunito, system-ui, sans-serif`;
       ctx.lineJoin = 'round'; ctx.lineWidth = fs * 0.22; ctx.strokeStyle = 'rgba(8,12,24,0.75)'; ctx.fillStyle = '#fff';
-      ctx.strokeText(inf.country, st.cx + 0.5, st.cy + 0.5); ctx.fillText(inf.country, st.cx + 0.5, st.cy + 0.5);
+      const label = this.isAlly(i) ? '🤝 ' + inf.country : inf.country;
+      ctx.strokeText(label, st.cx + 0.5, st.cy + 0.5); ctx.fillText(label, st.cx + 0.5, st.cy + 0.5);
       ctx.font = `800 ${fs * 0.62}px Nunito, system-ui, sans-serif`;
       const line = fmt(st.troops);
       ctx.lineWidth = fs * 0.16; ctx.strokeText(line, st.cx + 0.5, st.cy + 0.5 + fs * 0.85); ctx.fillText(line, st.cx + 0.5, st.cy + 0.5 + fs * 0.85);
@@ -608,6 +679,11 @@ export class ClientGame {
         ctx.fillStyle = g; ctx.beginPath(); ctx.arc(e.x, e.y, r, 0, 7); ctx.fill();
         if (e.r >= 7) { ctx.strokeStyle = `rgba(255,255,255,${(1 - t) * 0.7})`; ctx.lineWidth = 2 * px; ctx.beginPath(); ctx.arc(e.x, e.y, e.r * (0.5 + t * 1.6), 0, 7); ctx.stroke(); }
       } else if (e.k === 'line') { ctx.strokeStyle = e.c; ctx.globalAlpha = 1 - t; ctx.lineWidth = 2 * px; ctx.beginPath(); ctx.moveTo(e.x1, e.y1); ctx.lineTo(e.x2, e.y2); ctx.stroke(); ctx.globalAlpha = 1; }
+      else if (e.k === 'give') {
+        // a stream of dots flowing from giver to receiver
+        ctx.fillStyle = e.c;
+        for (let k = 0; k < 6; k++) { const q = (t * 1.4 - k * 0.08); if (q < 0 || q > 1) continue; const x = e.x1 + (e.x2 - e.x1) * q, y = e.y1 + (e.y2 - e.y1) * q - Math.sin(Math.PI * q) * 6; ctx.beginPath(); ctx.arc(x, y, 3.5 * px, 0, 7); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2 * px; ctx.stroke(); }
+      }
       else if (e.k === 'ping') { ctx.strokeStyle = `rgba(255,255,255,${1 - t})`; ctx.lineWidth = 3 * px; ctx.beginPath(); ctx.arc(e.x, e.y, (6 + t * 16) * px, 0, 7); ctx.stroke(); }
     }
     const flash = this.effects.find(e => e.k === 'flash');

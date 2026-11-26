@@ -102,7 +102,7 @@ function startGame(l) {
     const used = new Set(players.map(p => p.color));
     players.push({ id: 'bot' + i, name: names[i] + ' AI', color: COLORS.find(c => !used.has(c)) || COLORS[i % COLORS.length], isBot: true, country: `Republic of ${names[i]}` });
   }
-  l.game = new Engine({ players, settings: { spawnTime: l.settings.spawnTime, startMoney: l.settings.startMoney, winPercent: l.settings.winPercent, tribes: l.settings.tribes !== false } });
+  l.game = new Engine({ players, settings: { spawnTime: l.settings.spawnTime, startMoney: l.settings.startMoney, winPercent: l.settings.winPercent, tribes: l.settings.tribes !== false, botLevel: l.settings.botLevel || 'medium' } });
   l.state = 'game';
   for (const m of l.members) sendGameStart(l, m.k);
   pushLobby(l);
@@ -200,7 +200,7 @@ function handle(ws, msg) {
       leaveLobby(k);
       const code = newCode();
       const l = { code, host: k, members: [{ k, ready: true, color: COLORS[0] }], state: 'lobby', chat: [], banned: new Set(),
-        settings: { maxPlayers: 8, bots: 4, startMoney: 1000, spawnTime: 20, winPercent: 60, tribes: true, public: !!msg.public, name: `${u.username}'s room` } };
+        settings: { maxPlayers: 8, bots: 4, startMoney: 1000, spawnTime: 20, winPercent: 60, tribes: true, botLevel: 'medium', public: !!msg.public, name: `${u.username}'s room` } };
       lobbies.set(code, l); userLobby.set(k, code);
       sysChat(l, 'Room created. Share the code or invite friends!');
       pushLobby(l); pushFriendsOfFriends(k); return;
@@ -229,7 +229,7 @@ function handle(ws, msg) {
       return;
     }
     case 'lobby_list': {
-      const list = [...lobbies.values()].filter(l => l.settings.public && l.state === 'lobby').map(l => ({ code: l.code, name: l.settings.name, players: l.members.length, max: l.settings.maxPlayers, bots: l.settings.bots, host: db.users[l.host].username }));
+      const list = [...lobbies.values()].filter(l => l.settings.public && l.state === 'lobby').map(l => ({ code: l.code, name: l.settings.name, players: l.members.length, max: l.settings.maxPlayers, bots: l.settings.bots, level: l.settings.botLevel || 'medium', host: db.users[l.host].username }));
       return send(ws, { t: 'lobby_list', lobbies: list });
     }
   }
@@ -257,6 +257,7 @@ function handle(ws, msg) {
       for (const [f, [lo, hi]] of Object.entries(LIMITS)) if (s[f] !== undefined && Number.isFinite(+s[f])) l.settings[f] = Math.round(Math.min(hi, Math.max(lo, +s[f])));
       if (s.public !== undefined) l.settings.public = !!s.public;
       if (s.tribes !== undefined) l.settings.tribes = !!s.tribes;
+      if (['easy', 'medium', 'hard'].includes(s.botLevel)) l.settings.botLevel = s.botLevel;
       if (typeof s.name === 'string') l.settings.name = s.name.slice(0, 40) || l.settings.name;
       pushLobby(l); return;
     }

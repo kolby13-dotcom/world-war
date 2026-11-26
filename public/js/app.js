@@ -121,7 +121,7 @@ function setupHome() {
 }
 function renderLobbyList(list) {
   const el = $('#lobby-list');
-  el.innerHTML = list.length ? list.map(l => `<div class="row-card"><span class="pc-icon" style="width:42px;height:42px;font-size:20px;background:rgba(255,90,54,.15)">🌍</span><div class="rc-main"><b>${esc(l.name)}</b><small>${l.players}/${l.max} players · ${l.bots} bots · ${esc(l.host)}</small></div><div class="rc-act"><button class="btn small primary" data-code="${esc(l.code)}">Join</button></div></div>`).join('')
+  el.innerHTML = list.length ? list.map(l => `<div class="row-card"><span class="pc-icon" style="width:42px;height:42px;font-size:20px;background:rgba(255,90,54,.15)">🌍</span><div class="rc-main"><b>${esc(l.name)}</b><small>${l.players}/${l.max} players · ${l.bots} ${esc(l.level || 'medium')} bots · ${esc(l.host)}</small></div><div class="rc-act"><button class="btn small primary" data-code="${esc(l.code)}">Join</button></div></div>`).join('')
     : '<div class="empty">No open rooms right now.<br>Create one and be the first.</div>';
   for (const b of el.querySelectorAll('[data-code]')) b.onclick = () => send({ t: 'lobby_join', code: b.dataset.code });
 }
@@ -166,7 +166,7 @@ function setupLobby() {
   $('#b-start').onclick = () => { requestLandscape(); send({ t: 'lobby_start' }); };
   $('#lobby-chat-form').onsubmit = (e) => { e.preventDefault(); const i = $('#lobby-chat-in'); if (i.value.trim()) send({ t: 'lobby_chat', text: i.value }); i.value = ''; };
   for (const el of document.querySelectorAll('#lobby-settings [data-s]')) el.onchange = () => {
-    const v = el.type === 'checkbox' ? el.checked : el.type === 'text' ? el.value : +el.value;
+    const v = el.type === 'checkbox' ? el.checked : (el.type === 'text' || el.tagName === 'SELECT') ? el.value : +el.value;
     if (el.type === 'range') paintRange(el);
     send({ t: 'lobby_settings', settings: { [el.dataset.s]: v } });
   };
@@ -183,7 +183,7 @@ function renderLobby() {
   const isHost = l.host === state.user.username;
   $('#lobby-code').innerHTML = [...l.code].map(c => `<span>${esc(c)}</span>`).join('');
   $('#lobby-title').textContent = l.settings.name;
-  $('#lobby-count').textContent = `${l.members.length} + ${l.settings.bots} bots`;
+  $('#lobby-count').textContent = `${l.members.length} + ${l.settings.bots} ${l.settings.botLevel || 'medium'} bots`;
   $('#settings-note').textContent = isHost ? 'You\'re the leader' : 'Leader only';
   $('#lobby-members').innerHTML = l.members.map(m => `<div class="member ${m.online ? '' : 'away'}" style="--c:${m.color}">
       ${avatarHtml(m.username, m.av, 'sm')}
@@ -249,21 +249,27 @@ function setupPractice() {
     for (const o of document.querySelectorAll('#practice-money-chips .chip')) o.classList.toggle('on', o === c);
     $('#practice-money').value = c.dataset.v;
   };
+  for (const c of document.querySelectorAll('#practice-level-chips .chip')) c.onclick = () => {
+    for (const o of document.querySelectorAll('#practice-level-chips .chip')) o.classList.toggle('on', o === c);
+    $('#practice-level').value = c.dataset.v; store.set('bot_level', c.dataset.v);
+  };
+  const savedLevel = store.get('bot_level');
+  if (savedLevel) for (const c of document.querySelectorAll('#practice-level-chips .chip')) { c.classList.toggle('on', c.dataset.v === savedLevel); if (c.dataset.v === savedLevel) $('#practice-level').value = savedLevel; }
   $('#practice-go').onclick = () => {
     const name = state.user?.username || ($('#practice-name').value.trim().replace(/[^A-Za-z0-9_ ]/g, '').slice(0, 16) || 'Commander');
     store.set('offline_name', name);
     $('#practice-modal').classList.add('hidden');
     requestLandscape();
-    const nb = +bots.value, money = +$('#practice-money').value;
-    let n = 5; const tick = () => { countdown(n); if (n === 0) return startPractice(name, nb, money); n--; setTimeout(tick, 1000); }; tick();
+    const nb = +bots.value, money = +$('#practice-money').value, level = $('#practice-level').value;
+    let n = 5; const tick = () => { countdown(n); if (n === 0) return startPractice(name, nb, money, level); n--; setTimeout(tick, 1000); }; tick();
   };
 }
 const BOT_NAMES = ['Atlas', 'Boreal', 'Cobalt', 'Dune', 'Ember', 'Falcon', 'Granite', 'Harbor', 'Iris', 'Juniper', 'Kestrel', 'Lumen', 'Monsoon', 'Nova', 'Onyx', 'Pike', 'Quartz', 'Raven', 'Sable'];
-function startPractice(name, nb, money) {
+function startPractice(name, nb, money, botLevel = 'medium') {
   const names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
   const players = [{ id: 'me', name, color: COLORS[3] }];
   for (let i = 0; i < nb; i++) players.push({ id: 'bot' + i, name: names[i] + ' AI', color: COLORS.filter(c => c !== COLORS[3])[i], isBot: true, country: `Republic of ${names[i]}` });
-  const engine = new Engine({ players, settings: { spawnTime: 30, startMoney: money } });
+  const engine = new Engine({ players, settings: { spawnTime: 30, startMoney: money, botLevel } });
   show('game');
   const end = () => { clearInterval(state.offlineLoop); state.game.destroy(); state.game = null; show(state.user ? 'home' : 'auth'); };
   state.game = new ClientGame({ root: $('#game'), you: 0, snap: engine.snapshot(), username: name, send: (a) => engine.handle('me', a), onExit: end, offline: true, myId: 'me' });

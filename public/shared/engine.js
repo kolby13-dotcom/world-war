@@ -2,7 +2,7 @@
 // browser for offline games against bots. Produces a "patch" every tick that
 // clients apply to their view of the world.
 import { MAP_W as W, MAP_H as H, getLand } from './map.js';
-import { BUILDINGS, SHIP, CAPITAL, UPGRADE_MULT, LEVEL_STATS as LS, BUILDING_HP, BOMBS, ECON, TICK_MS } from './rules.js';
+import { BUILDINGS, SHIP, CAPITAL, UPGRADE_MULT, LEVEL_STATS as LS, BUILDING_HP, BOMBS, ECON, TICK_MS, BOT_LEVELS } from './rules.js';
 import { botThink } from './bots.js';
 
 const N = W * H;
@@ -15,7 +15,9 @@ function dist2(ax, ay, bx, by) { const dx = ax - bx, dy = ay - by; return dx * d
 
 export class Engine {
   constructor({ players, settings = {} }) {
-    this.settings = Object.assign({ spawnTime: 20, startMoney: ECON.startMoney, winPercent: 60, speed: 1, tribes: true }, settings);
+    this.settings = Object.assign({ spawnTime: 20, startMoney: ECON.startMoney, winPercent: 60, speed: 1, tribes: true, botLevel: 'medium' }, settings);
+    if (!BOT_LEVELS[this.settings.botLevel]) this.settings.botLevel = 'medium';
+    this.diff = BOT_LEVELS[this.settings.botLevel];
     this.land = getLand();
     this.landCount = this.land.reduce((a, b) => a + b, 0);
     this.coastal = new Uint8Array(N);
@@ -23,6 +25,7 @@ export class Engine {
     this.owner = new Int16Array(N).fill(-1);
     this.fallout = new Uint16Array(N);
     this.tilePos = new Int32Array(N).fill(-1);
+    this.lostBy = new Int16Array(N).fill(-1); this.lostAt = new Int32Array(N); // who last lost this tile, and when
     this.players = players.map((p, idx) => ({
       idx, id: p.id, name: p.name, color: p.color, isBot: !!p.isBot,
       country: p.country || `${p.name}'s Country`,
@@ -40,6 +43,8 @@ export class Engine {
     this.buildingsDirty = true; this.infoDirty = true; this.supplyDirty = true;
     this.supply = this.players.map(() => new Uint8Array(N));
     this.winner = null;
+    // diplomacy: alliances are 'a-b' keys (a < b), requests are 'from>to' -> expiry tick
+    this.allies = new Set(); this.requests = new Map(); this.noAllyUntil = new Map(); this.diploDirty = true; this.lastMsg = new Map();
     for (const p of this.players) if (p.isBot) this.randomSpawn(p);
     this.nextTribeAt = 0;
     if (this.settings.tribes) for (let k = 0; k < 10; k++) this.spawnTribe();
@@ -54,12 +59,71 @@ export class Engine {
     if (i < N - W) out.push(i + W);
     return out;
   }
-  msg(p, text, kind = 'info') { this.events.push({ k: 'msg', to: p.id, text, kind }); }
+  msg(p, text, kind = 'info') {
+    // the same message to the same player at most once every 6 seconds
+    const key = p.idx + '|' + text, last = this.lastMsg.get(key);
+    if (last !== undefined && this.tick - last < 6 * TPS) return;
+    this.lastMsg.set(key, this.tick);
+    if (this.lastMsg.size > 400) this.lastMsg.clear();
+    this.events.push({ k: 'msg', to: p.id, text, kind });
+  }
+  // ---------- diplomacy ----------
+  akey(a, b) { return a < b ? a + '-' + b : b + '-' + a; }
+  allied(a, b) { return a !== b && a >= 0 && b >= 0 && this.allies.has(this.akey(a, b)); }
+  alliesOf(i) { const out = []; for (const k of this.allies) { const [a, b] = k.split('-').map(Number); if (a === i) out.push(b); else if (b === i) out.push(a); } return out; }
+  formAlliance(a, b) {
+    this.allies.add(this.akey(a, b)); this.requests.delete(a + '>' + b); this.requests.delete(b + '>' + a); this.diploDirty = true;
+    // call off any fighting between the two
+    for (const atk of this.attacks) if ((atk.a === a && atk.t === b) || (atk.a === b && atk.t === a)) atk.done = true;
+    const A = this.players[a], B = this.players[b];
+    this.events.push({ k: 'msg', text: `🤝 ${A.country} and ${B.country} are now allies.`, kind: 'good' });
+  }
+  requestAlliance(p, to) {
+    const t = this.players[to];
+    if (!t || t === p || !t.alive || t.tribe || p.tribe) return;
+    if (this.allied(p.idx, to)) return this.msg(p, `You're already allied with ${t.country}.`);
+    const cool = this.noAllyUntil.get(this.akey(p.idx, to)) || 0;
+    if (cool > this.tick) return this.msg(p, `${t.country} won't trust you again for ${Math.ceil((cool - this.tick) / TPS)}s.`, 'error');
+    if (this.requests.has(to + '>' + p.idx)) return this.formAlliance(p.idx, to);
+    if (this.requests.has(p.idx + '>' + to)) return this.msg(p, `Waiting for ${t.country} to answer.`);
+    this.requests.set(p.idx + '>' + to, this.tick + 30 * TPS); this.diploDirty = true;
+    this.msg(p, `Alliance request sent to ${t.country}.`);
+    if (t.isBot) { t.botState.reqs = t.botState.reqs || []; t.botState.reqs.push({ from: p.idx, at: this.tick + (15 + Math.random() * 40) | 0 }); }
+    else this.events.push({ k: 'allyReq', to: t.id, from: p.idx });
+  }
+  answerAlliance(p, from, yes) {
+    const key = from + '>' + p.idx; if (!this.requests.has(key)) return;
+    const f = this.players[from];
+    if (yes && f.alive) return this.formAlliance(from, p.idx);
+    this.requests.delete(key); this.diploDirty = true;
+    this.msg(f, `${p.country} turned down your alliance.`, 'error');
+  }
+  betray(p, to) {
+    if (!this.allied(p.idx, to)) return;
+    const t = this.players[to];
+    this.allies.delete(this.akey(p.idx, to)); this.diploDirty = true;
+    this.noAllyUntil.set(this.akey(p.idx, to), this.tick + 120 * TPS);
+    // the betrayed side rallies: their land is harder to take for a while
+    t.rallyUntil = this.tick + 30 * TPS; t.rallyVs = p.idx;
+    this.events.push({ k: 'msg', text: `🗡️ ${p.country} betrayed ${t.country}!`, kind: 'warn' });
+    this.events.push({ k: 'betray', a: p.idx, t: to });
+  }
+  giveTroops(p, to, ratio) {
+    const t = this.players[to];
+    if (!t || !t.alive || !this.allied(p.idx, to)) return this.msg(p, 'You can only send people to allies.', 'error');
+    const n = Math.floor(p.troops * ratio);
+    if (n < 10) return this.msg(p, 'Not enough people to send.', 'error');
+    p.troops -= n; t.troops += n;
+    this.events.push({ k: 'give', a: p.idx, t: to, n });
+    this.msg(p, `Sent ${n.toLocaleString()} people to ${t.country}.`, 'good');
+    if (!t.isBot) this.msg(t, `${p.country} sent you ${n.toLocaleString()} people!`, 'good');
+  }
   setOwner(i, pidx) {
     const old = this.owner[i];
     if (old === pidx) return;
     const x = i % W, y = (i / W) | 0;
     if (old >= 0) {
+      if (pidx >= 0) { this.lostBy[i] = old; this.lostAt[i] = this.tick; }
       const op = this.players[old], pos = this.tilePos[i], last = op.tiles.pop();
       if (last !== i) { op.tiles[pos] = last; this.tilePos[last] = pos; }
       this.tilePos[i] = -1; op.sx -= x; op.sy -= y;
@@ -73,7 +137,15 @@ export class Engine {
     const b = this.buildingAt.get(i);
     if (b) {
       if (pidx >= 0 && b.type !== 'capital') b.owner = pidx;
-      else { if (b.type === 'capital' && pidx >= 0) { this.events.push({ k: 'msg', text: `${this.players[pidx].country} captured the capital of ${this.players[b.owner].country}!`, kind: 'warn' }); this.players[pidx].money += 2000; } this.destroyBuilding(b); }
+      else {
+        if (b.type === 'capital' && pidx >= 0) {
+          // losing your capital is a crushing blow: half your people scatter
+          const v = this.players[b.owner];
+          this.events.push({ k: 'msg', text: `${this.players[pidx].country} captured the capital of ${v.country}!`, kind: 'warn' });
+          this.players[pidx].money += 2000; v.troops *= 0.5; v.lostCapital = true;
+        }
+        this.destroyBuilding(b);
+      }
       this.buildingsDirty = true;
     }
     this.changes.push(i, pidx);
@@ -209,6 +281,10 @@ export class Engine {
       case 'bomb': return this.doBomb(p, a.what, a.tile | 0);
       case 'moveShip': return this.doMoveShip(p, a.id | 0, a.tile | 0);
       case 'surrender': return this.eliminate(p);
+      case 'ally': return this.requestAlliance(p, a.to | 0);
+      case 'allyAnswer': return this.answerAlliance(p, a.from | 0, !!a.yes);
+      case 'betray': return this.betray(p, a.to | 0);
+      case 'give': return this.giveTroops(p, a.to | 0, Math.min(1, Math.max(0.05, +a.ratio || 0.25)));
     }
   }
 
@@ -229,6 +305,7 @@ export class Engine {
     if (tile < 0 || tile >= N || !this.land[tile]) return;
     const target = this.owner[tile];
     if (target === p.idx) return;
+    if (this.allied(p.idx, target)) return this.giveTroops(p, target, ratio);
     if (this.fallout[tile]) return this.msg(p, 'That land is covered in fallout. Wait for it to clear.', 'error');
     const troops = Math.floor(p.troops * ratio);
     if (troops < 10) return this.msg(p, 'Not enough people to send.', 'error');
@@ -253,13 +330,19 @@ export class Engine {
     }
     let atk = this.attacks.find(a => a.a === p.idx && a.t === target);
     if (!atk) { atk = { id: this.nextId++, a: p.idx, t: target, troops: 0, acc: 0, cand: new Set(), fx: 0, fy: 0 }; this.attacks.push(atk); }
+    // a counter-attack (they hit us first, recently) fights harder
+    if (target >= 0 && (this.attacks.some(a => a.a === target && a.t === p.idx) || (this.players[target].lastHit?.[p.idx] || -1e9) > this.tick - 30 * TPS)) atk.counter = true;
+    if (target >= 0) (p.lastHit ||= {})[target] = this.tick;
     atk.troops += troops;
     [atk.fx, atk.fy] = tileXY(focusTile);
     for (const i of p.tiles) for (const n of this.nb(i)) if (this.owner[n] === target && this.land[n] && (!region || region.has(n))) atk.cand.add(n);
   }
 
-  defenseMult(tile, def) {
+  defenseMult(tile, def, atkr = -1) {
     let m = this.supply[def][tile] ? 1.3 : 1; const [x, y] = tileXY(tile);
+    const d = this.players[def];
+    if (d.rallyUntil > this.tick && d.rallyVs === atkr) m *= 1.5;
+    if (d.lostCapital) m *= 0.75;
     for (const b of this.buildings) {
       if (b.type !== 'outpost' || b.owner !== def || b.disabled > this.tick) continue;
       const r = LS.outpost.radius[b.level];
@@ -277,7 +360,9 @@ export class Engine {
       let rate = (0.22 + Math.sqrt(atk.troops) / 30);
       if (enemy) {
         const dens = Math.max(2, enemy.troops / Math.max(1, enemy.tiles.length));
-        rate *= 0.4 * Math.min(1.4, Math.max(0.25, Math.sqrt(atk.troops / (dens * 40))));
+        // big armies roll forward fast, small ones stall: wars end instead of grinding on
+        rate *= 0.55 * Math.min(2.4, Math.max(0.25, Math.sqrt(atk.troops / (dens * 30))));
+        if (atk.counter) rate *= 1.35;
       }
       atk.acc += rate;
       if (!atk.cand.size) { atk.done = true; continue; }
@@ -291,13 +376,17 @@ export class Engine {
         atk.cand.delete(best);
         if (this.owner[best] !== atk.t || this.fallout[best]) continue;
         if (!this.nb(best).some(m => this.owner[m] === atk.a)) continue;
-        const supplied = sup[best] === 1;
-        const weight = supplied ? 1 : 1 / ECON.outOfSupplySpeed;
+        // taking back land that was just taken from you is quick and cheap
+        const reclaim = enemy && this.lostBy[best] === atk.a && this.tick - this.lostAt[best] < 90 * TPS;
+        const supplied = sup[best] === 1 || reclaim;
+        const weight = (supplied ? 1 : 1 / ECON.outOfSupplySpeed) * (reclaim ? 0.5 : 1);
         let cost = ECON.neutralCost * (1 + p.tiles.length / 1500), loss = 0;
         if (enemy) {
           const dens = enemy.troops / Math.max(1, enemy.tiles.length);
-          cost = Math.max(3, dens * 1.3) * this.defenseMult(best, atk.t);
-          loss = Math.max(1, dens * 0.5);
+          cost = Math.max(3, dens * 1.3) * this.defenseMult(best, atk.t, atk.a);
+          if (reclaim) cost *= 0.5;
+          if (atk.counter) cost *= 0.75;
+          loss = Math.max(1, dens * 0.8);
         }
         if (!supplied) cost *= ECON.outOfSupplyCost;
         if (atk.troops < cost) { atk.troops = 0; atk.done = true; break; }
@@ -344,15 +433,15 @@ export class Engine {
       if (this.advance(b, ECON.boatSpeed + LS.port.boatSpeed[this.levelOf(p, 'port')])) {
         b.done = true;
         const tgt = this.owner[b.land];
-        if (tgt === b.owner) { p.troops += b.troops; continue; }
+        if (tgt === b.owner || this.allied(tgt, b.owner)) { if (tgt !== b.owner) this.players[tgt].troops += b.troops; else p.troops += b.troops; continue; }
         if (this.fallout[b.land]) { this.msg(p, 'Your boat turned back: the beach was covered in fallout.'); p.troops += b.troops * 0.5; continue; }
         let cost = ECON.neutralCost;
-        if (tgt >= 0) { const e = this.players[tgt]; cost = Math.max(2, e.troops / Math.max(1, e.tiles.length)) * 1.1 * this.defenseMult(b.land, tgt); }
+        if (tgt >= 0) { const e = this.players[tgt]; cost = Math.max(2, e.troops / Math.max(1, e.tiles.length)) * 1.1 * this.defenseMult(b.land, tgt, b.owner); }
         if (b.troops < cost) { this.msg(p, 'Your landing force was wiped out on the beach.', 'error'); continue; }
         b.troops -= cost; this.setOwner(b.land, b.owner);
         const ft = this.owner[b.focus] === b.owner ? b.land : b.focus;
         const t2 = this.owner[ft] === b.owner ? tgt : this.owner[ft];
-        if (t2 === b.owner) { p.troops += b.troops; continue; }
+        if (t2 === b.owner || this.allied(t2, b.owner)) { p.troops += b.troops; continue; }
         const region = this.regionReach(p, ft, t2);
         this.startAttack(p, t2, b.troops, ft, region);
       }
@@ -419,14 +508,15 @@ export class Engine {
       if (s.cd > 0) { s.cd--; continue; }
       const r = LS.ship.range[s.level], r2 = r * r, dmg = LS.ship.damage[s.level];
       let fired = false;
-      const boat = this.boats.find(b => b.owner !== s.owner && dist2(b.x, b.y, s.x, s.y) <= r2);
+      const foe = (o) => o !== s.owner && !this.allied(o, s.owner) && !this.players[o]?.tribe;
+      const boat = this.boats.find(b => foe(b.owner) && dist2(b.x, b.y, s.x, s.y) <= r2);
       if (boat) { boat.done = true; this.boats = this.boats.filter(b => b !== boat); this.shot(s, boat.x, boat.y); this.msg(this.players[boat.owner], 'One of your boats was sunk by a battleship!', 'error'); fired = true; }
       if (!fired) {
-        const ship = this.ships.find(o => o.owner !== s.owner && !o.dead && dist2(o.x, o.y, s.x, s.y) <= r2);
+        const ship = this.ships.find(o => foe(o.owner) && !o.dead && dist2(o.x, o.y, s.x, s.y) <= r2);
         if (ship) { ship.hp -= dmg; this.shot(s, ship.x, ship.y); if (ship.hp <= 0) { ship.dead = true; this.events.push({ k: 'boom', x: ship.x, y: ship.y, r: 1.5, type: 'ship' }); this.players[s.owner].kills++; } fired = true; }
       }
       if (!fired) {
-        const b = this.buildings.find(o => o.owner !== s.owner && dist2(o.x, o.y, s.x, s.y) <= r2);
+        const b = this.buildings.find(o => foe(o.owner) && dist2(o.x, o.y, s.x, s.y) <= r2);
         if (b) { b.hp -= dmg; this.shot(s, b.x, b.y); this.buildingsDirty = true; if (b.hp <= 0) { this.events.push({ k: 'boom', x: b.x, y: b.y, r: 1.5, type: 'ship' }); this.destroyBuilding(b); } fired = true; }
       }
       if (fired) s.cd = LS.ship.cooldown[s.level];
@@ -438,6 +528,7 @@ export class Engine {
   doBomb(p, what, tile) {
     const def = BOMBS[what]; if (!def || tile < 0 || tile >= N) return;
     const [tx, ty] = tileXY(tile);
+    if (this.allied(p.idx, this.owner[tile])) return this.msg(p, `${this.players[this.owner[tile]].country} is your ally. Betray them first if you really mean it.`, 'error');
     const silos = this.buildings.filter(b => b.owner === p.idx && b.type === 'silo');
     if (!silos.length) return this.msg(p, 'Build a Missile Silo first.', 'error');
     const able = silos.filter(b => b.level >= def.silo);
@@ -470,7 +561,7 @@ export class Engine {
       // interception by enemy batteries
       if (f > 0.1 && m.type !== 'emp_') {
         for (const b of this.buildings) {
-          if (b.type !== 'battery' || b.owner === m.owner || b.cd > 0 || b.disabled > this.tick) continue;
+          if (b.type !== 'battery' || b.owner === m.owner || this.allied(b.owner, m.owner) || b.cd > 0 || b.disabled > this.tick) continue;
           const r = LS.battery.radius[b.level];
           if (dist2(b.x, b.y, x, y) > r * r) continue;
           b.cd = LS.battery.cooldown[b.level];
@@ -555,10 +646,11 @@ export class Engine {
       p.maxTroops = ECON.baseMaxTroops + t * ECON.maxTroopsPerTile + p._city;
       const base = 3 + Math.sqrt(t) * 0.8 + p._cityG;
       const room = Math.max(0, 1 - p.troops / p.maxTroops);
-      p.growth = base * 4 * room * this.settings.speed;
+      const eco = p.isBot ? this.diff.eco : 1;
+      p.growth = base * 4 * room * this.settings.speed * eco;
       p.troops = Math.min(p.maxTroops, p.troops + p.growth * dt);
       if (p.troops > p.maxTroops) p.troops -= (p.troops - p.maxTroops) * 0.02;
-      p.income = (ECON.baseMoney + t * ECON.moneyPerTile + p._money) * this.settings.speed;
+      p.income = (ECON.baseMoney + t * ECON.moneyPerTile + p._money) * this.settings.speed * eco;
       p.money += p.income * dt;
     }
     void cityL;
@@ -602,6 +694,9 @@ export class Engine {
     if (!p.alive) return;
     for (const t of [...p.tiles]) this.setOwner(t, -1);
     p.alive = false; p.eliminatedAt = this.tick;
+    for (const o of this.alliesOf(p.idx)) this.allies.delete(this.akey(p.idx, o));
+    for (const k of [...this.requests.keys()]) if (k.split('>').map(Number).includes(p.idx)) this.requests.delete(k);
+    this.diploDirty = true;
     this.buildings = this.buildings.filter(b => b.owner !== p.idx); this.buildingAt = new Map(this.buildings.map(b => [b.tile, b]));
     this.buildingsDirty = true; this.infoDirty = true;
     if (!p.tribe) this.events.push({ k: 'msg', text: `${p.country} has fallen!`, kind: 'warn' });
@@ -614,11 +709,17 @@ export class Engine {
     for (const p of alive) if (p.tiles.length >= this.landCount * this.settings.winPercent / 100) win = p;
     if (!win && alive.length === 1 && this.players.length > 1) win = alive[0];
     if (!win && alive.length === 0) win = this.players[0];
+    // everyone left standing is allied and together they hold enough land: shared victory
+    let team = null;
+    if (!win && alive.length > 1 && alive.every(a => alive.every(b => a === b || this.allied(a.idx, b.idx)))) {
+      const land = alive.reduce((s, q) => s + q.tiles.length, 0);
+      if (land >= this.landCount * this.settings.winPercent / 100) { win = alive.reduce((a, b) => b.tiles.length > a.tiles.length ? b : a); team = alive.map(q => q.idx); }
+    }
     if (win) {
       this.phase = 'over'; this.winner = win.idx;
-      const ranking = this.players.filter(p => !p.tribe).sort((a, b) => (b === win) - (a === win) || (b.alive - a.alive) || b.tiles.length - a.tiles.length || b.eliminatedAt - a.eliminatedAt)
+      const ranking = this.players.filter(p => !p.tribe).sort((a, b) => (b === win) - (a === win) || (this.allied(b.idx, win.idx) - this.allied(a.idx, win.idx)) || (b.alive - a.alive) || b.tiles.length - a.tiles.length || b.eliminatedAt - a.eliminatedAt)
         .map(p => ({ idx: p.idx, name: p.name, country: p.country, tiles: p.tiles.length, peak: p.peakTiles, kills: p.kills, bombs: p.bombsLaunched }));
-      this.events.push({ k: 'over', winner: win.idx, ranking });
+      this.events.push({ k: 'over', winner: win.idx, team, ranking });
     }
   }
 
@@ -634,6 +735,7 @@ export class Engine {
     } else if (this.phase === 'play') {
       for (let i = 0; i < N; i++) if (this.fallout[i]) this.fallout[i]--;
       if (this.empEnds === this.tick) this.supplyDirty = true;
+      for (const [k, exp] of this.requests) if (exp <= this.tick) { this.requests.delete(k); this.diploDirty = true; }
       this.refreshSupply();
       this.economy();
       for (const p of this.players) if (p.alive && p.isBot) { if (p.tribe) this.tribeThink(p); else botThink(this, p); }
@@ -655,6 +757,7 @@ export class Engine {
       out: Math.floor(this.attacks.filter(a => a.a === p.idx).reduce((s, a) => s + a.troops, 0) + this.boats.filter(b => b.owner === p.idx).reduce((s, b) => s + b.troops, 0)),
     }));
   }
+  diplomacy() { return { al: [...this.allies].map(k => k.split('-').map(Number)), rq: [...this.requests.keys()].map(k => k.split('>').map(Number)) }; }
   playerInfo() { return this.players.map(p => ({ idx: p.idx, id: p.id, name: p.name, country: p.country, color: p.color, isBot: p.isBot, tribe: !!p.tribe })); }
   buildingList() { return this.buildings.map(b => ({ id: b.id, type: b.type, owner: b.owner, x: b.x, y: b.y, level: b.level, hp: b.hp, dis: b.disabled > this.tick ? 1 : 0 })); }
 
@@ -670,6 +773,7 @@ export class Engine {
     };
     if (this.buildingsDirty) { patch.bl = this.buildingList(); this.buildingsDirty = false; }
     if (this.infoDirty) { patch.pi = this.playerInfo(); this.infoDirty = false; }
+    if (this.diploDirty) { patch.dip = this.diplomacy(); this.diploDirty = false; }
     this.changes = []; this.events = [];
     return patch;
   }
@@ -678,6 +782,6 @@ export class Engine {
   snapshot() {
     const own = []; for (let i = 0; i < N; i++) if (this.owner[i] >= 0) own.push(i, this.owner[i]);
     const fo = []; for (let i = 0; i < N; i++) if (this.fallout[i]) fo.push(i, this.fallout[i]);
-    return { pi: this.playerInfo(), own, fo, bl: this.buildingList(), phase: this.phase, tick: this.tick, settings: this.settings };
+    return { pi: this.playerInfo(), own, fo, bl: this.buildingList(), phase: this.phase, tick: this.tick, settings: this.settings, dip: this.diplomacy() };
   }
 }
