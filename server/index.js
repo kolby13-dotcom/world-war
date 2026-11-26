@@ -7,20 +7,29 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { Engine } from '../public/shared/engine.js';
 import { COLORS, TICK_MS } from '../public/shared/rules.js';
+import { openStore } from './store.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, '..', 'public');
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, '..', 'data');
-const DB_FILE = path.join(DATA_DIR, 'users.json');
 const PORT = +process.env.PORT || 8080;
-const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
 
 // ---------------- persistence ----------------
-fs.mkdirSync(AVATAR_DIR, { recursive: true });
-let db = { users: {}, tokens: {} };
-try { db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); } catch { /* first run */ }
-let saveTimer = null;
-function save() { clearTimeout(saveTimer); saveTimer = setTimeout(() => fs.writeFile(DB_FILE, JSON.stringify(db), () => {}), 500); }
+const store = await openStore({ dataDir: DATA_DIR, databaseUrl: process.env.DATABASE_URL });
+let db = (await store.loadDb()) || { users: {}, tokens: {} };
+db.users ||= {}; db.tokens ||= {};
+console.log(`Loaded ${Object.keys(db.users).length} accounts`);
+let saveTimer = null, saving = Promise.resolve(), dirty = false;
+function flush() {
+  clearTimeout(saveTimer); saveTimer = null;
+  if (!dirty) return saving;
+  dirty = false; const json = JSON.stringify(db);
+  saving = saving.then(() => store.saveDb(json)).catch((e) => { console.error('save failed', e.message); dirty = true; saveTimer = setTimeout(flush, 3000); });
+  return saving;
+}
+function save() { dirty = true; if (!saveTimer) saveTimer = setTimeout(flush, 400); }
+// save before the host stops or restarts the server
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, async () => { try { await flush(); await store.close(); } finally { process.exit(0); } });
 const key = (u) => String(u || '').trim().toLowerCase();
 function hashPw(pw, salt) { return crypto.scryptSync(pw, salt, 32).toString('hex'); }
 
@@ -77,12 +86,18 @@ function leaveLobby(k) {
   if (l.state === 'game') { pushFriendsOfFriends(k); return; } // stays in the match; can come back
   l.members = l.members.filter(m => m.k !== k);
   sendUser(k, { t: 'lobby', lobby: null });
-  if (!l.members.length) { lobbies.delete(code); return; }
+  if (!l.members.length) { closeLobby(l); return; }
   if (l.host === k) { l.host = l.members[0].k; sysChat(l, `${db.users[l.host].username} is now the leader`); }
   sysChat(l, `${db.users[k].username} left`);
   pushLobby(l); pushFriendsOfFriends(k);
 }
 
+// Stop any timers a room has running and forget it.
+function closeLobby(l) {
+  clearTimeout(l.cdTimer); clearInterval(l.loop);
+  if (l.state === 'countdown') for (const m of l.members) sendUser(m.k, { t: 'countdown', n: -1 });
+  l.state = 'closed'; lobbies.delete(l.code);
+}
 function startCountdown(l) {
   l.state = 'countdown'; let n = 5;
   const tick = () => {
@@ -113,6 +128,15 @@ function sendGameStart(l, k) {
   sendUser(k, { t: 'game_start', you: idx, snap: l.game.snapshot() });
 }
 function gameTick(l) {
+  // nobody watching for 2 minutes: end the match instead of running it forever
+  if (l.game.tick % 100 === 0) {
+    const watching = l.members.some(m => online.has(m.k) && userLobby.get(m.k) === l.code);
+    if (watching) l.emptySince = 0; else if (!l.emptySince) l.emptySince = Date.now();
+    else if (Date.now() - l.emptySince > 120000) {
+      for (const m of l.members) if (userLobby.get(m.k) === l.code) userLobby.delete(m.k);
+      return closeLobby(l);
+    }
+  }
   const patch = l.game.step();
   const shared = patch.ev.filter(e => !e.to);
   const byUser = new Map();
@@ -134,7 +158,7 @@ function gameTick(l) {
     sysChat(l, win ? `${win.country} (${win.name}) won the war!` : 'Game over');
     // drop members who left during the match
     l.members = l.members.filter(m => userLobby.get(m.k) === l.code);
-    if (!l.members.length) { lobbies.delete(l.code); return; }
+    if (!l.members.length) { closeLobby(l); return; }
     if (!l.members.some(m => m.k === l.host)) l.host = l.members[0].k;
     setTimeout(() => pushLobby(l), 500);
   }
@@ -146,6 +170,9 @@ function handle(ws, msg) {
   const k = ws.user;
   if (!k) {
     if (msg.t === 'register' || msg.t === 'login') {
+      // slow down password guessing: at most 6 tries per 30 seconds per connection
+      const now = Date.now(); ws.tries = (ws.tries || []).filter(t => now - t < 30000); ws.tries.push(now);
+      if (ws.tries.length > 6) return err(ws, 'Too many tries. Wait a few seconds and try again.');
       const name = String(msg.username || '').trim(), pw = String(msg.password || '');
       const nk = key(name);
       if (msg.t === 'register') {
@@ -156,7 +183,8 @@ function handle(ws, msg) {
         db.users[nk] = { username: name, salt, hash: hashPw(pw, salt), friends: [], incoming: [], outgoing: [], stats: { games: 0, wins: 0 }, created: Date.now() };
       } else {
         const u = db.users[nk];
-        if (!u || hashPw(pw, u.salt) !== u.hash) return err(ws, 'Wrong username or password.');
+        if (!u) return err(ws, `There's no account called ${name.slice(0, 16)}. Check the spelling, or tap Create account.`);
+        if (hashPw(pw, u.salt) !== u.hash) return err(ws, 'Wrong password for that username.');
       }
       const token = crypto.randomBytes(24).toString('hex');
       db.tokens[token] = nk; save();
@@ -217,10 +245,10 @@ function handle(ws, msg) {
       if (typeof msg.avatar === 'string') {
         const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(msg.avatar);
         if (!m || m[2].length > 400000) return err(ws, 'That picture is too big. Try another one.');
-        fs.writeFileSync(path.join(AVATAR_DIR, k + '.img'), Buffer.from(m[2], 'base64'));
+        store.putAvatar(k, Buffer.from(m[2], 'base64')).catch(e => console.error('avatar save failed', e.message));
         u.avType = 'image/' + m[1]; u.av = Date.now();
       }
-      if (msg.avatar === null) { u.av = 0; fs.rm(path.join(AVATAR_DIR, k + '.img'), () => {}); }
+      if (msg.avatar === null) { u.av = 0; store.dropAvatar(k).catch(() => {}); }
       save();
       send(ws, { t: 'auth', token: null, user: { username: u.username, stats: u.stats, av: u.av || 0, bio: u.bio || '' } });
       handle(ws, { t: 'profile_get', username: u.username });
@@ -290,21 +318,23 @@ function authed(ws, k, token) {
   if (l) { send(ws, { t: 'lobby', lobby: lobbyView(l) }); if (l.state === 'game') { const idx = l.game.players.findIndex(p => p.id === k); send(ws, { t: 'game_start', you: idx, snap: l.game.snapshot() }); } }
   else {
     // rejoin a running match we were part of
-    for (const g of lobbies.values()) if (g.state === 'game' && g.members.some(m => m.k === k)) { userLobby.set(k, g.code); send(ws, { t: 'lobby', lobby: lobbyView(g) }); sendGameStart(g, k); break; }
+    let found = false;
+    for (const g of lobbies.values()) if (g.state === 'game' && g.members.some(m => m.k === k)) { userLobby.set(k, g.code); send(ws, { t: 'lobby', lobby: lobbyView(g) }); sendGameStart(g, k); found = true; break; }
+    if (!found) send(ws, { t: 'lobby', lobby: null });
   }
 }
 
 // ---------------- http ----------------
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.json': 'application/json', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json' };
 const server = http.createServer((req, res) => {
-  let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  let p; try { p = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch { res.writeHead(400); return res.end(); }
   if (p.startsWith('/avatar/')) {
     const ak = key(p.slice(8)), au = db.users[ak];
     if (!au || !au.av) { res.writeHead(404); return res.end(); }
-    return fs.readFile(path.join(AVATAR_DIR, ak + '.img'), (e, data) => {
-      if (e) { res.writeHead(404); return res.end(); }
+    return store.getAvatar(ak).then((data) => {
+      if (!data) { res.writeHead(404); return res.end(); }
       res.writeHead(200, { 'Content-Type': au.avType || 'image/jpeg', 'Cache-Control': 'public, max-age=86400' }); res.end(data);
-    });
+    }, () => { res.writeHead(500); res.end(); });
   }
   if (p === '/' || p.startsWith('/join/')) p = '/index.html';
   const file = path.normalize(path.join(PUBLIC, p));
@@ -315,7 +345,7 @@ const server = http.createServer((req, res) => {
     res.end(data);
   });
 });
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 1024 * 1024 });
 wss.on('connection', (ws) => {
   ws.on('message', (data) => { let msg; try { msg = JSON.parse(data); } catch { return; } try { handle(ws, msg); } catch (e) { console.error(e); } });
   ws.on('close', () => {

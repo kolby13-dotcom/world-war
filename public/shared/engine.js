@@ -659,6 +659,7 @@ export class Engine {
   // ---------- tribes: small grey settlements that hold their land but are weak ----------
   spawnTribe() {
     if (this.players.filter(p => p.tribe && p.alive).length >= 14) return;
+    if (this.players.filter(p => p.tribe).length >= 45) return; // keeps long games' updates small
     for (let k = 0; k < 300; k++) {
       const c = (Math.random() * N) | 0, cy = (c / W) | 0;
       if (!this.land[c] || this.owner[c] !== -1 || this.fallout[c] || cy < 12 || cy > H - 22) continue;

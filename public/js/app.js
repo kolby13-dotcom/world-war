@@ -46,7 +46,11 @@ function onMsg(m) {
     case 'friends': state.friends = m; renderFriends(); break;
     case 'lobby':
       state.lobby = m.lobby;
-      if (!m.lobby) { if (!state.game) show('home'); break; }
+      if (!m.lobby) {
+        // our online match is gone (for example the server restarted): don't leave the player on a frozen map
+        if (state.game && !state.game.offline) { state.game.destroy(); state.game = null; show('home'); toast('That match ended. The server restarted or everyone left.', 'error'); break; }
+        if (!state.game) show('home'); break;
+      }
       if (!state.game) show('lobby');
       renderLobby(); break;
     case 'lobby_list': renderLobbyList(m.lobbies); break;

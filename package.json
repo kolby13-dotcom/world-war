@@ -9,6 +9,13 @@
     "build:offline": "node tools/build-offline.js",
     "sim": "node tools/sim.js"
   },
-  "dependencies": { "ws": "^8.18.0" },
-  "devDependencies": { "esbuild": "^0.24.0", "topojson-client": "^3.1.0", "world-atlas": "^2.0.2" }
+  "dependencies": {
+    "pg": "^8.23.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "topojson-client": "^3.1.0",
+    "world-atlas": "^2.0.2"
+  }
 }
