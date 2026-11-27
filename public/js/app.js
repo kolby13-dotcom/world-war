@@ -72,6 +72,8 @@ function onMsg(m) {
 // ---------------- screens ----------------
 function show(id) {
   for (const s of document.querySelectorAll('.screen')) s.classList.toggle('hidden', s.id !== id);
+  // only the match itself is sideways; menus and the room screen follow how the phone is held
+  if (id === 'game') lockLandscape(); else unlockOrientation();
   if (id === 'home' && state.connected) send({ t: 'lobby_list' });
 }
 function toast(text, kind = 'info') {
@@ -295,14 +297,21 @@ function startPractice(name, nb, money, botLevel = 'medium') {
   }, TICK_MS);
 }
 
-// Phones: ask for full screen + landscape while we still have a tap to do it with.
+// Phones: go full screen on a tap (browsers only allow it then), so the screen can turn sideways
+// later, when the match actually starts.
 function requestLandscape() {
   if (!matchMedia('(pointer: coarse)').matches) return;
   try {
-    const lock = () => { try { screen.orientation?.lock?.('landscape').catch(() => {}); } catch { /* unsupported */ } };
     const el = document.documentElement;
-    if (!document.fullscreenElement && el.requestFullscreen) el.requestFullscreen({ navigationUI: 'hide' }).then(lock, () => {}); else lock();
+    if (!document.fullscreenElement && el.requestFullscreen) el.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
   } catch { /* not allowed here */ }
+}
+function lockLandscape() {
+  if (!matchMedia('(pointer: coarse)').matches) return;
+  try { screen.orientation?.lock?.('landscape').catch(() => {}); } catch { /* unsupported */ }
+}
+function unlockOrientation() {
+  try { screen.orientation?.unlock?.(); } catch { /* unsupported */ }
 }
 
 // ---------------- profiles ----------------

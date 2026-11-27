@@ -462,10 +462,11 @@ export class ClientGame {
     if (panel._key === key) return; panel._key = key;
     const owner = this.info[ownerIdx];
     panel.innerHTML = `<div class="insp-head"><span class="ci">${ICON[type]}</span><div><b>${name}</b><small></small></div><button class="icon-btn ins-x" aria-label="Close">${SVG.x}</button></div>
+      ${mine && cost ? `<button class="btn ${money >= cost ? 'go' : ''} ins-up" ${money < cost ? 'disabled' : ''}>Upgrade to level ${obj.level + 1} · $${fmt(cost)}</button>` : ''}
+      ${mine && type === 'ship' ? '<button class="btn ins-move">Sail somewhere</button>' : ''}
       ${type === 'capital' ? '' : `<div class="lv">${[1, 2, 3].map(l => `<i class="${l <= obj.level ? 'on' : ''}"></i>`).join('')}</div>`}
       <div class="insp-stat">${statLine(type, obj.level)}${obj.dis ? ' · <span class="bad">knocked out by EMP</span>' : ''}</div>
-      ${mine && cost ? `<div class="insp-next">Level ${obj.level + 1}: ${statLine(type, obj.level + 1)}</div><button class="btn ${money >= cost ? 'go' : ''} ins-up" ${money < cost ? 'disabled' : ''}>Upgrade · $${fmt(cost)}</button>` : ''}
-      ${mine && type === 'ship' ? '<button class="btn ins-move">Sail somewhere</button>' : ''}`;
+      ${mine && cost ? `<div class="insp-next">Level ${obj.level + 1}: ${statLine(type, obj.level + 1)}</div>` : ''}`;
     $('small', panel).textContent = (type === 'capital' ? '' : `Level ${obj.level} · `) + (owner ? owner.country : '');
     $('.ins-x', panel).onclick = () => { this.select(null); if (this.mode.kind === 'ship') this.setMode({ kind: 'attack' }); };
     const up = $('.ins-up', panel); if (up) up.onclick = () => this.send({ type: 'upgrade', id: obj.id });
