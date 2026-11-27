@@ -363,6 +363,11 @@ const server = http.createServer((req, res) => {
   // Android app link verification. Paste the file's contents into the ASSET_LINKS setting on the host,
   // or commit it as public/.well-known/assetlinks.json.
   if (p === '/.well-known/assetlinks.json' && process.env.ASSET_LINKS) { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(process.env.ASSET_LINKS); }
+  // quick health check for the owner: where accounts are saved and how long the server has been up
+  if (p === '/api/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({ accountsSavedIn: store.kind === 'database' ? 'database (safe)' : 'temporary files (lost on restart!)', accounts: Object.keys(db.users).length, rooms: lobbies.size, upMinutes: Math.round(process.uptime() / 60) }, null, 1));
+  }
   // account deletion from the web (linked from the privacy page and the Play listing)
   if (p === '/api/delete-account' && req.method === 'POST') {
     let body = ''; req.on('data', (c) => { body += c; if (body.length > 10000) req.destroy(); });
