@@ -419,3 +419,5 @@ input[type=range]:disabled { opacity: .5; }
   #game .menu-modal .btn.xl { padding: 10px 12px; font-size: 14px; }
   .over-hero .big { font-size: 36px; }
 }
+.give-ratios { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin: 4px 0 14px; }
+.give-modal .give-sub { max-width: 320px; margin: 6px auto 0; }

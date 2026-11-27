@@ -111,6 +111,9 @@ export class ClientGame {
       <div><span class="ci">🚀</span><p><b>Bombs</b>Build a Missile Silo, then use Bombs. Batteries shoot missiles down and radars make them better.</p></div>
       <div><span class="ci">🏆</span><p><b>Win</b>Own the target share of the world's land, or be the last country standing. If everyone left is allied and together owns enough land, the alliance wins.</p></div>
       </div><button class="btn primary xl b-help-close">Got it</button></div></div>
+    <div class="modal-wrap hidden give-modal"><div class="modal"><div class="prof-top"><span class="flag-big give-flag"></span><h2 class="give-title">Send people?</h2><p class="muted give-sub"></p></div>
+      <div class="give-ratios"></div>
+      <div class="modal-actions"><button class="btn ghost b-give-no">Cancel</button><button class="btn go b-give-ok">Send</button></div></div></div>
     <div class="modal-wrap hidden over-modal"><div class="modal over"></div></div>
     <div class="rotate"><div class="phone"></div><h2>Turn your phone sideways</h2><p>The map needs the room. Rotate to landscape to play.</p><button class="btn primary b-rot">Go full screen</button></div>`;
     const r = this.root;
@@ -279,9 +282,28 @@ export class ClientGame {
     this.allies = new Set(); this.sentReq = new Set(); this.gotReq = new Set();
     for (const [a, b] of d.al) { if (a === this.you) this.allies.add(b); else if (b === this.you) this.allies.add(a); }
     for (const [f, t] of d.rq) { if (f === this.you) this.sentReq.add(t); else if (t === this.you) this.gotReq.add(f); }
+    this.painter.setAllies(this.allies, this.owner);
     this.renderOffers();
   }
   isAlly(i) { return this.allies?.has(i); }
+  // sending people to an ally always asks first, with the amount spelled out
+  askGive(to) {
+    const m = $('.give-modal', this.root), inf = this.info[to]; if (!inf) return;
+    let ratio = this.ratio;
+    const draw = () => {
+      const n = Math.floor((this.me()?.troops || 0) * ratio);
+      $('.give-flag', m).style.background = inf.color;
+      $('.give-title', m).textContent = `Send ${fmt(n)} people?`;
+      $('.give-sub', m).textContent = `They'll leave your country and join your ally ${inf.country}. You can't take them back.`;
+      $('.give-ratios', m).innerHTML = [0.1, 0.25, 0.5, 0.75, 1].map(r => `<button class="chip ${Math.abs(r - ratio) < 0.001 ? 'on' : ''}" data-r="${r}">${Math.round(r * 100)}%</button>`).join('');
+      for (const b of m.querySelectorAll('[data-r]')) b.onclick = () => { ratio = +b.dataset.r; draw(); };
+    };
+    draw();
+    const tick = setInterval(() => { if (m.classList.contains('hidden') || !this.isAlly(to)) { clearInterval(tick); m.classList.add('hidden'); } else draw(); }, 500);
+    $('.b-give-no', m).onclick = () => m.classList.add('hidden');
+    $('.b-give-ok', m).onclick = () => { m.classList.add('hidden'); this.send({ type: 'give', to, ratio }); };
+    m.classList.remove('hidden');
+  }
   renderOffers() {
     const box = $('.offers', this.root); if (!box) return;
     const key = [...this.gotReq].join(',');
@@ -450,7 +472,7 @@ export class ClientGame {
       + (live ? '<p class="lb-tip">Allies can\'t invade or shell each other. Tap an ally\'s land to send people.</p>' : '');
     for (const b of lb.querySelectorAll('[data-ally]')) b.onclick = () => this.send({ type: 'ally', to: +b.dataset.ally });
     for (const b of lb.querySelectorAll('[data-accept]')) b.onclick = () => this.send({ type: 'allyAnswer', from: +b.dataset.accept, yes: true });
-    for (const b of lb.querySelectorAll('[data-give]')) b.onclick = () => this.send({ type: 'give', to: +b.dataset.give, ratio: this.ratio });
+    for (const b of lb.querySelectorAll('[data-give]')) b.onclick = () => this.askGive(+b.dataset.give);
     for (const b of lb.querySelectorAll('[data-betray]')) b.onclick = () => {
       if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Sure?'; setTimeout(() => { delete b.dataset.armed; b.textContent = '🗡️'; }, 2500); return; }
       this.send({ type: 'betray', to: +b.dataset.betray });
@@ -591,10 +613,7 @@ export class ClientGame {
     }
     if (this.selected) { this.select(null); return; }
     if (!this.land[tile] || this.owner[tile] === this.you) return;
-    if (this.isAlly(this.owner[tile])) {
-      this.send({ type: 'give', to: this.owner[tile], ratio: this.ratio });
-      this.effects.push({ k: 'ping', x: w.x, y: w.y, t0: performance.now(), dur: 500 }); return;
-    }
+    if (this.isAlly(this.owner[tile])) { this.askGive(this.owner[tile]); return; }
     this.send({ type: 'attack', tile, ratio: this.ratio });
     this.effects.push({ k: 'ping', x: w.x, y: w.y, t0: performance.now(), dur: 500 });
     let nearMe = false;
@@ -673,8 +692,17 @@ export class ClientGame {
       const fs = Math.max(10 * px, Math.min(Math.sqrt(st.tiles) * 0.45, 22 * px));
       ctx.font = `900 ${fs}px Nunito, system-ui, sans-serif`;
       ctx.lineJoin = 'round'; ctx.lineWidth = fs * 0.22; ctx.strokeStyle = 'rgba(8,12,24,0.75)'; ctx.fillStyle = '#fff';
-      const label = this.isAlly(i) ? '🤝 ' + inf.country : inf.country;
+      const label = inf.country;
       ctx.strokeText(label, st.cx + 0.5, st.cy + 0.5); ctx.fillText(label, st.cx + 0.5, st.cy + 0.5);
+      if (this.isAlly(i)) {
+        // a bright "ALLY" tag above the name so allies stand out at a glance
+        const tf = fs * 0.55; ctx.font = `900 ${tf}px Nunito, system-ui, sans-serif`;
+        const tag = '🤝 ALLY', tw = ctx.measureText(tag).width + tf * 1.1, th = tf * 1.5, ty = st.cy + 0.5 - fs * 1.05;
+        ctx.fillStyle = '#2ee6a6'; ctx.strokeStyle = 'rgba(8,12,24,0.8)'; ctx.lineWidth = tf * 0.14;
+        ctx.beginPath(); ctx.roundRect(st.cx + 0.5 - tw / 2, ty - th / 2, tw, th, th / 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#06261b'; ctx.textBaseline = 'middle'; ctx.fillText(tag, st.cx + 0.5, ty + tf * 0.05);
+        ctx.textBaseline = 'alphabetic'; ctx.fillStyle = '#fff'; ctx.font = `900 ${fs}px Nunito, system-ui, sans-serif`;
+      }
       ctx.font = `800 ${fs * 0.62}px Nunito, system-ui, sans-serif`;
       const away = this.awayOf(i);
       const line = away ? `${fmt(st.troops)} · ⚔️ ${fmt(away)} away` : fmt(st.troops);

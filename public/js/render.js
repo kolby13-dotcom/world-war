@@ -13,6 +13,7 @@ function vnoise(x, y, scale, seed) {
   return top * (1 - sy) + bot * sy;
 }
 
+const ALLY_EDGE = [46, 230, 166];
 const S = 4, BORDER = 2; // fine pixels per tile; border width in fine pixels
 export class MapPainter {
   constructor() {
@@ -135,7 +136,13 @@ export class MapPainter {
     }
   }
   tileKey(i) { if (!this.land[i]) return -2; const o = this.owner ? this.owner[i] : -1; return o >= 0 && this.colors[o] ? o : -1; }
-  setPlayers(info) { this.colors = info.map(p => { const c = hexToRgb(p.color); return { fill: c, border: c.map(v => (v * 0.55) | 0) }; }); }
+  setPlayers(info) { this.info = info; this.colors = info.map((p, i) => { const c = hexToRgb(p.color); return { fill: c, border: this.allies?.has(i) ? ALLY_EDGE : c.map(v => (v * 0.55) | 0) }; }); }
+  // allies get a bright mint edge around their land
+  setAllies(allies, owner) {
+    const key = [...allies].sort().join();
+    if (key === this.allyKey) return; this.allyKey = key; this.allies = new Set(allies);
+    if (this.info) { this.setPlayers(this.info); if (owner) this.setOwner(owner); }
+  }
   setOwner(owner) {
     this.owner = owner; this.dirtyTiles.length = 0;
     for (let i = 0; i < W * H; i++) this.tk[i] = this.tileKey(i);
