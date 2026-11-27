@@ -154,14 +154,10 @@ function gameTick(l) {
     const win = l.game.players[l.game.winner];
     for (const m of l.members) { const u = db.users[m.k]; u.stats = u.stats || { games: 0, wins: 0 }; u.stats.games++; if (win && win.id === m.k) u.stats.wins++; }
     save();
-    l.state = 'lobby'; l.game = null;
-    for (const m of l.members) m.ready = false;
-    sysChat(l, win ? `${win.country} (${win.name}) won the war!` : 'Game over');
-    // drop members who left during the match
-    l.members = l.members.filter(m => userLobby.get(m.k) === l.code);
-    if (!l.members.length) { closeLobby(l); return; }
-    if (!l.members.some(m => m.k === l.host)) l.host = l.members[0].k;
-    setTimeout(() => pushLobby(l), 500);
+    // the match is over: close the room and send everyone home (they see the results screen first)
+    for (const m of l.members) if (userLobby.get(m.k) === l.code) { userLobby.delete(m.k); sendUser(m.k, { t: 'lobby', lobby: null, ended: true }); }
+    l.game = null; closeLobby(l);
+    for (const m of l.members) pushFriendsOfFriends(m.k);
   }
 }
 

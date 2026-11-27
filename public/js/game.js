@@ -1,7 +1,8 @@
 // Client side of a match: holds the view state, draws the map, and turns taps into actions.
 import { MAP_W as W, MAP_H as H, getLand } from '../shared/map.js';
 import { BUILDINGS, SHIP, CAPITAL, BOMBS, LEVEL_STATS as LS, UPGRADE_MULT, TICK_MS } from '../shared/rules.js';
-import { MapPainter, drawBuilding, drawDot, drawShip, drawBoat } from './render.js';
+import { MapPainter, drawBuilding, drawDot, drawShip, drawBoat, drawMissile } from './render.js';
+import { sfx } from './sound.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -19,9 +20,12 @@ const SVG = {
   flag: '<svg viewBox="0 0 24 24"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>',
 };
 
+const ACTION_SFX = { attack: () => sfx.march(), give: () => sfx.march(), build: () => sfx.build(), upgrade: () => sfx.build(), ally: () => sfx.tap() };
+
 export class ClientGame {
   constructor({ root, you, snap, username, send, onExit, onChat, offline, myId }) {
-    this.myId = myId; this.root = root; this.you = you; this.username = username; this.send = send; this.onExit = onExit; this.offline = offline; this.onChatCb = onChat;
+    this.myId = myId; this.root = root; this.you = you; this.username = username;
+    this.send = (a) => { const s = ACTION_SFX[a.type]; if (s) s(); send(a); }; this.onExit = onExit; this.offline = offline; this.onChatCb = onChat;
     this.land = getLand();
     this.landCount = this.land.reduce((a, b) => a + b, 0);
     this.owner = new Int16Array(W * H).fill(-1);
@@ -96,7 +100,7 @@ export class ClientGame {
     <div class="modal-wrap hidden name-modal"><div class="modal"><div class="prof-top"><span class="flag-big"></span><h2>Name your country</h2><p class="muted">Everyone will see this on the map.</p></div>
       <input class="country-in" maxlength="32" aria-label="Country name"><div class="modal-actions"><button class="btn ghost b-name-no">No thanks</button><button class="btn primary b-name-ok">Start here</button></div></div></div>
     <div class="modal-wrap hidden menu-modal"><div class="modal"><h2>Paused?</h2><p class="muted">The war keeps going while this is open.</p>
-      <button class="btn xl b-close">Back to the map</button><button class="btn ghost xl b-help">How to play</button><button class="btn ghost xl b-rename">Rename country</button><button class="btn ghost xl b-leave">Leave game</button><button class="btn danger xl b-surrender">Surrender</button></div></div>
+      <button class="btn xl b-close">Back to the map</button><button class="btn ghost xl b-help">How to play</button><button class="btn ghost xl b-rename">Rename country</button><button class="btn ghost xl b-sound"></button><button class="btn ghost xl b-leave">Leave game</button><button class="btn danger xl b-surrender">Surrender</button></div></div>
     <div class="modal-wrap hidden help-modal"><div class="modal"><h2>How to play</h2><div class="help-list">
       <div><span class="ci">👆</span><p><b>Expand</b>Tap empty land next to you. The slider sets how many people go. More people means a faster push.</p></div>
       <div><span class="ci">🏰</span><p><b>Supply range</b>Land near your capital, cities, outposts and ports is quick and cheap to take. Past that it costs 3 times as many people. Build at your edges to keep growing.</p></div>
@@ -127,6 +131,8 @@ export class ClientGame {
       this.send({ type: 'surrender' }); $('.menu-modal', r).classList.add('hidden');
     };
     $('.b-leave', r).onclick = () => this.onExit();
+    const sb = $('.b-sound', r), sl = () => { sb.textContent = sfx.on ? '🔊 Sound: on' : '🔇 Sound: off'; }; sl();
+    sb.onclick = () => { sfx.toggle(); sl(); };
     $('.b-rename', r).onclick = () => { $('.menu-modal', r).classList.add('hidden'); this.askName(null); };
     $('.mode-pill button', r).onclick = () => this.setMode({ kind: 'attack' });
     $('.b-name-ok', r).onclick = () => this.confirmName(false);
@@ -279,7 +285,7 @@ export class ClientGame {
   renderOffers() {
     const box = $('.offers', this.root); if (!box) return;
     const key = [...this.gotReq].join(',');
-    if (box._key === key) return; box._key = key;
+    if (box._key === key) return; if (this.gotReq.size && key.length > (box._key || '').length) sfx.chime(); box._key = key;
     box.innerHTML = [...this.gotReq].slice(0, 2).map(f => `<div class="offer glass"><i style="background:${this.info[f]?.color}"></i><span><b></b> wants to be allies</span><button class="btn small ghost" data-no="${f}">No</button><button class="btn small go" data-yes="${f}">Ally</button></div>`).join('');
     box.querySelectorAll('.offer b').forEach((b, k) => { b.textContent = this.info[[...this.gotReq][k]]?.country || ''; });
     for (const b of box.querySelectorAll('[data-yes]')) b.onclick = () => this.send({ type: 'allyAnswer', from: +b.dataset.yes, yes: true });
@@ -298,6 +304,8 @@ export class ClientGame {
     this.stats = p.ps;
     if (p.bl) { this.setBuildings(p.bl); if (this.selected && this.selected.kind === 'b' && !this.buildings.find(b => b.id === this.selected.id)) this.select(null); }
     this.prev = { ms: new Map(this.missiles.map(m => [m.id, m])), boats: new Map(this.boats.map(b => [b.id, b])), ships: new Map(this.ships.map(s => [s.id, s])) };
+    for (const m of p.ms) if (!this.prev.ms.has(m.id) && m.type !== 'mini') sfx.launch();
+    for (const b of p.boats) if (!this.prev.boats.has(b.id) && b.o === this.you) sfx.sail();
     this.boats = p.boats; this.ships = p.ships; this.attacks = p.atk; this.missiles = p.ms; this.lastPatchAt = performance.now();
     if (this.selected && this.selected.kind === 's' && !this.ships.find(s => s.id === this.selected.id)) { this.select(null); if (this.mode.kind === 'ship') this.setMode({ kind: 'attack' }); }
     const prevPhase = this.phase; this.phase = p.phase; this.spawnLeft = p.spawnLeft;
@@ -313,10 +321,11 @@ export class ClientGame {
   onEvent(e) {
     if (e.to && this.myId && e.to !== this.myId) return;
     const now = performance.now();
-    if (e.k === 'msg') this.toast(e.text, e.kind);
+    if (e.k === 'msg') { this.toast(e.text, e.kind); if (e.kind === 'good') sfx.good(); else if (e.kind === 'error') sfx.bad(); }
     else if (e.k === 'boom') {
       this.effects.push({ k: 'boom', x: e.x + 0.5, y: e.y + 0.5, r: e.r, type: e.type, t0: now, dur: e.type === 'bigone' ? 3200 : e.r > 5 ? 1800 : 700 });
       if (e.r >= 5) this.shake = Math.max(this.shake, e.type === 'bigone' ? 22 : e.r);
+      sfx.boom(e.r, e.type === 'bigone');
       if (e.type === 'bigone') this.effects.push({ k: 'flash', t0: now, dur: 900 });
       if (FALLOUT_TICKS[e.type]) {
         const R = Math.ceil(e.r);
@@ -325,21 +334,22 @@ export class ClientGame {
           const i = y * W + x; if (this.land[i]) { this.painter.fallout.set(i, FALLOUT_TICKS[e.type]); this.painter.paint(i); }
         }
       }
-    } else if (e.k === 'shot') this.effects.push({ k: 'line', x1: e.x1 + 0.5, y1: e.y1 + 0.5, x2: e.x2 + 0.5, y2: e.y2 + 0.5, t0: now, dur: 300, c: '#ffdd55' });
-    else if (e.k === 'icpt') this.effects.push({ k: 'line', x1: e.bx + 0.5, y1: e.by + 0.5, x2: e.x + 0.5, y2: e.y + 0.5, t0: now, dur: 400, c: e.hit ? '#7cf' : 'rgba(150,200,255,0.5)' });
+    } else if (e.k === 'shot') { sfx.shot(); this.effects.push({ k: 'line', x1: e.x1 + 0.5, y1: e.y1 + 0.5, x2: e.x2 + 0.5, y2: e.y2 + 0.5, t0: now, dur: 300, c: '#ffdd55' }); }
+    else if (e.k === 'icpt') { sfx.zap(e.hit); this.effects.push({ k: 'line', x1: e.bx + 0.5, y1: e.by + 0.5, x2: e.x + 0.5, y2: e.y + 0.5, t0: now, dur: 400, c: e.hit ? '#7cf' : 'rgba(150,200,255,0.5)' }); }
     else if (e.k === 'over') this.showOver(e);
-    else if (e.k === 'give') { const a = this.stats[e.a], b = this.stats[e.t]; if (a && b && a.cx >= 0 && b.cx >= 0) this.effects.push({ k: 'give', x1: a.cx + 0.5, y1: a.cy + 0.5, x2: b.cx + 0.5, y2: b.cy + 0.5, c: this.info[e.a]?.color || '#fff', t0: now, dur: 1400 }); }
-    else if (e.k === 'betray' && (e.t === this.you)) this.shake = Math.max(this.shake, 6);
+    else if (e.k === 'give') { if (e.t === this.you || e.a === this.you) sfx.give(); const a = this.stats[e.a], b = this.stats[e.t]; if (a && b && a.cx >= 0 && b.cx >= 0) this.effects.push({ k: 'give', x1: a.cx + 0.5, y1: a.cy + 0.5, x2: b.cx + 0.5, y2: b.cy + 0.5, c: this.info[e.a]?.color || '#fff', t0: now, dur: 1400 }); }
+    else if (e.k === 'betray' && (e.t === this.you)) { this.shake = Math.max(this.shake, 6); sfx.betray(); }
   }
   showOver(e) {
     const win = this.info[e.winner]; const meWon = e.winner === this.you;
     const box = $('.over', this.root);
     const inTeam = !meWon && e.team?.includes(this.you);
+    if (meWon || inTeam) sfx.win(); else sfx.lose();
     box.innerHTML = `<div class="over-hero"><span class="big">${meWon ? '🏆' : inTeam ? '🤝' : '🏳️'}</span><h2>${meWon ? 'You conquered the world!' : inTeam ? 'Your alliance won!' : 'Game over'}</h2><p class="muted winner"></p></div>
       <div style="overflow-x:auto"><table><tr><th>#</th><th>Country</th><th>Peak land</th><th>Bombed</th><th>Bombs</th></tr>
       ${e.ranking.map((r, i) => `<tr class="${r.idx === this.you ? 'me' : ''}"><td>${i + 1}</td><td><i style="background:${this.info[r.idx].color}"></i>${esc(r.country)}</td><td>${r.peak}</td><td>${r.kills}</td><td>${r.bombs}</td></tr>`).join('')}</table></div>
       ${e.team && e.team.length > 1 ? `<p class="muted center">Alliance victory: ${e.team.map(i => esc(this.info[i].country)).join(', ')}</p>` : ''}
-      <button class="btn primary xl b-over">${this.offline ? 'Back to menu' : 'Back to the room'}</button><button class="btn ghost xl b-over-stay">Look at the map</button>`;
+      <button class="btn primary xl b-over">Back to menu</button><button class="btn ghost xl b-over-stay">Look at the map</button>`;
     $('.winner', box).textContent = `${win.country} (${win.name}) won.`;
     $('.b-over', box).onclick = () => this.onExit();
     $('.b-over-stay', box).onclick = () => { $('.over-modal', this.root).classList.add('hidden'); const lb = $('.b-menu', this.root); lb.onclick = () => this.onExit(); lb.innerHTML = SVG.x; };
@@ -371,6 +381,7 @@ export class ClientGame {
     const missiles = this.missiles.filter(m => m.o !== this.you && m.type !== 'mini' && this.owner[Math.round(m.ty) * W + Math.round(m.tx)] === this.you);
     if (this.phase === 'play' && (incoming || missiles.length) && this.mode.kind === 'attack') {
       alarm.classList.remove('hidden'); alarm.classList.toggle('missile', !!missiles.length);
+      if (missiles.length) sfx.siren(); else sfx.alarm();
       this.incoming = incoming;
       let text;
       if (missiles.length) text = `☢️ ${missiles.length > 1 ? missiles.length + ' missiles' : 'Missile'} incoming from ${this.info[missiles[0].o].country}`;
@@ -659,10 +670,20 @@ export class ClientGame {
       const pos = (q) => [m.fx + (m.tx - m.fx) * q + 0.5, m.fy + (m.ty - m.fy) * q + 0.5 - Math.sin(Math.PI * q) * hgt];
       ctx.strokeStyle = m.o === this.you ? 'rgba(255,255,255,0.35)' : 'rgba(255,80,60,0.5)'; ctx.lineWidth = 1.5 * px; ctx.setLineDash([3 * px, 3 * px]);
       ctx.beginPath(); for (let q = p; q <= 1.0001; q += 0.04) { const [x, y] = pos(Math.min(1, q)); ctx.lineTo(x, y); } ctx.stroke(); ctx.setLineDash([]);
-      ctx.strokeStyle = 'rgba(255,230,200,0.85)'; ctx.lineWidth = 2.5 * px; ctx.beginPath(); for (let q = Math.max(0, p - 0.12); q <= p; q += 0.02) { const [x, y] = pos(q); ctx.lineTo(x, y); } ctx.stroke();
-      const [x, y] = pos(p); const big = m.type === 'bigone' ? 9 : m.type === 'hydrogen' ? 7 : m.type === 'mini' ? 3 : 5;
-      ctx.fillStyle = m.type === 'emp' ? '#7cf' : m.type === 'bigone' ? '#ff3b1f' : '#fff'; ctx.beginPath(); ctx.arc(x, y, big * px, 0, 7); ctx.fill();
-      ctx.strokeStyle = this.info[m.o]?.color || '#f00'; ctx.lineWidth = 2 * px; ctx.stroke();
+      // ground shadow under the missile, so you can tell how high it is
+      const gq = p, gx = m.fx + (m.tx - m.fx) * gq + 0.5, gy = m.fy + (m.ty - m.fy) * gq + 0.5, lift = Math.sin(Math.PI * p) * hgt;
+      const size = (m.type === 'bigone' ? 1.9 : m.type === 'hydrogen' ? 1.5 : m.type === 'mini' ? 0.55 : 1.15) * px;
+      ctx.fillStyle = `rgba(0,0,0,${0.28 - Math.min(0.18, lift * 0.006)})`; ctx.beginPath(); ctx.ellipse(gx, gy, (7 + lift * 0.08) * size, (3 + lift * 0.04) * size, 0, 0, 7); ctx.fill();
+      // smoke trail: soft puffs that grow and fade behind the missile
+      const tail = m.type === 'mini' ? 0.1 : 0.22;
+      for (let k = 28; k >= 1; k--) {
+        const q = p - tail * k / 28; if (q < 0) continue;
+        const [sx, sy] = pos(q), a = (1 - k / 28) * 0.4;
+        ctx.fillStyle = m.type === 'emp' ? `rgba(140,220,255,${a})` : `rgba(205,208,218,${a})`;
+        ctx.beginPath(); ctx.arc(sx, sy, (1.6 + k * 0.22) * size, 0, 7); ctx.fill();
+      }
+      const [x, y] = pos(p), [ax, ay] = pos(Math.min(1, p + 0.01));
+      drawMissile(ctx, x, y, Math.atan2(ay - y, ax - x), m.type, this.info[m.o]?.color || '#f33', size, now);
       if (m.o !== this.you && m.type !== 'mini') { ctx.strokeStyle = 'rgba(255,40,40,0.85)'; ctx.lineWidth = 2 * px; const r = (m.type === 'cluster' ? 12 : BOMBS[m.type].radius); ctx.beginPath(); ctx.arc(m.tx + 0.5, m.ty + 0.5, r, 0, 7); ctx.stroke(); }
     }
 

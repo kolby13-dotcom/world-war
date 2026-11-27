@@ -3,6 +3,7 @@ import { ClientGame } from './game.js';
 import { Engine } from '../shared/engine.js';
 import { COLORS, TICK_MS } from '../shared/rules.js';
 import { paintRange } from './game.js';
+import { sfx } from './sound.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const OFFLINE_ONLY = !!window.WW_OFFLINE;
@@ -50,6 +51,8 @@ function onMsg(m) {
     case 'lobby':
       state.lobby = m.lobby;
       if (!m.lobby) {
+        // the room closed because our match finished: stay on the results screen, Exit goes home
+        if (m.ended && state.game) break;
         // our online match is gone (for example the server restarted): don't leave the player on a frozen map
         if (state.game && !state.game.offline) { state.game.destroy(); state.game = null; show('home'); toast('That match ended. The server restarted or everyone left.', 'error'); break; }
         if (!state.game) show('home'); break;
@@ -228,7 +231,7 @@ let cdTimer = null;
 function countdown(n) {
   const el = $('#countdown');
   if (n < 0) { el.classList.add('hidden'); return; }
-  el.classList.remove('hidden'); $('#countdown b').textContent = n === 0 ? 'GO!' : n;
+  el.classList.remove('hidden'); $('#countdown b').textContent = n === 0 ? 'GO!' : n; sfx.tick(n === 0);
   $('#countdown b').classList.remove('pop'); void el.offsetWidth; $('#countdown b').classList.add('pop');
   clearTimeout(cdTimer); if (n === 0) cdTimer = setTimeout(() => el.classList.add('hidden'), 700);
 }
@@ -385,3 +388,6 @@ function boot() {
 }
 window.__ww = state; // handy for debugging in the console
 boot();
+
+// soft click on buttons
+document.addEventListener('click', (e) => { if (e.target.closest?.('.btn, .chip, .tab, .icon-btn, .practice-card')) sfx.tap(); }, true);

@@ -262,3 +262,43 @@ export function drawBoat(ctx, b, color, size, t) {
   ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.beginPath(); ctx.moveTo(-0.06, -0.75); ctx.quadraticCurveTo(-0.4, -0.4, -0.48, -0.08); ctx.lineTo(-0.06, -0.08); ctx.closePath(); ctx.fill();
   ctx.restore();
 }
+
+// A flying missile, pointing along its path. `s` is the size scale (world units per screen pixel times a type factor).
+export function drawMissile(ctx, x, y, ang, type, color, s, t) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.scale(s, s);
+  const flick = 0.75 + 0.25 * Math.sin(t / 35 + x * 7);
+  if (type === 'emp') {
+    // glowing energy orb with crackles
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 9);
+    g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.35, 'rgba(140,220,255,0.95)'); g.addColorStop(1, 'rgba(60,140,255,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 9 * flick + 1, 0, 7); ctx.fill();
+    ctx.strokeStyle = 'rgba(220,245,255,0.9)'; ctx.lineWidth = 0.8;
+    for (let i = 0; i < 3; i++) { const a = t / 90 + i * 2.1; ctx.beginPath(); ctx.moveTo(Math.cos(a) * 3, Math.sin(a) * 3); ctx.lineTo(Math.cos(a + 0.4) * 6, Math.sin(a + 0.4) * 6); ctx.lineTo(Math.cos(a + 0.1) * 9, Math.sin(a + 0.1) * 9); ctx.stroke(); }
+    ctx.restore(); return;
+  }
+  // engine flame
+  const fl = (type === 'bigone' ? 14 : 10) * flick;
+  const fg = ctx.createLinearGradient(-6, 0, -6 - fl, 0);
+  fg.addColorStop(0, 'rgba(255,255,220,1)'); fg.addColorStop(0.35, 'rgba(255,190,60,0.95)'); fg.addColorStop(1, 'rgba(255,70,20,0)');
+  ctx.fillStyle = fg; ctx.beginPath(); ctx.moveTo(-5.5, -2.2); ctx.quadraticCurveTo(-6 - fl, 0, -5.5, 2.2); ctx.closePath(); ctx.fill();
+  const glow = ctx.createRadialGradient(-6, 0, 0, -6, 0, 6); glow.addColorStop(0, 'rgba(255,200,90,0.6)'); glow.addColorStop(1, 'rgba(255,120,40,0)');
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(-6, 0, 6, 0, 7); ctx.fill();
+  // fins (country color)
+  ctx.fillStyle = color; ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 0.6;
+  ctx.beginPath(); ctx.moveTo(-5.5, -1.8); ctx.lineTo(-7.5, -4.6); ctx.lineTo(-3, -1.8); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-5.5, 1.8); ctx.lineTo(-7.5, 4.6); ctx.lineTo(-3, 1.8); ctx.closePath(); ctx.fill(); ctx.stroke();
+  // body
+  const body = type === 'bigone' ? '#3a3f4b' : '#f2f4f8';
+  ctx.fillStyle = body; ctx.beginPath(); ctx.moveTo(-6, -2); ctx.lineTo(3.5, -2); ctx.quadraticCurveTo(8, -1.6, 9, 0); ctx.quadraticCurveTo(8, 1.6, 3.5, 2); ctx.lineTo(-6, 2); ctx.closePath(); ctx.fill(); ctx.stroke();
+  // shading along the bottom
+  ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fillRect(-6, 0.6, 9.5, 1.4);
+  // color band and nose
+  ctx.fillStyle = color; ctx.fillRect(-1.2, -2, 1.8, 4);
+  ctx.fillStyle = type === 'bigone' ? '#ff3b1f' : type === 'hydrogen' ? '#ffc83d' : '#ff5a36';
+  ctx.beginPath(); ctx.moveTo(5.2, -1.85); ctx.quadraticCurveTo(8, -1.5, 9, 0); ctx.quadraticCurveTo(8, 1.5, 5.2, 1.85); ctx.closePath(); ctx.fill();
+  if (type === 'bigone' || type === 'hydrogen' || type === 'atomic') { // radiation mark
+    ctx.fillStyle = '#ffc83d'; ctx.beginPath(); ctx.arc(-3.6, 0, 1.15, 0, 7); ctx.fill();
+    ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(-3.6, 0, 0.35, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
