@@ -41,6 +41,18 @@ function noise({ dur = 0.3, vol = 0.3, from = 2000, to = 200, q = 0.7, type = 'l
 export const sfx = {
   get on() { return on; },
   toggle() { on = !on; try { localStorage.setItem(KEY, on ? 'on' : 'off'); } catch { /* ignore */ } if (on) sfx.tap(); return on; },
+  // claiming land: soft plucks that climb a pentatonic scale while you keep expanding
+  expand(n = 1, enemy = false) {
+    const now = performance.now();
+    if (now - (last.get('expand') || 0) < 110) return; last.set('expand', now);
+    const streak = now - (last.get('expandRun') || 0) < 900 ? (sfx._step = (sfx._step || 0) + 1) : (sfx._step = 0); last.set('expandRun', now);
+    const scale = [523, 587, 659, 784, 880, 1046, 1175, 1318];
+    const f = scale[streak % scale.length] * (enemy ? 0.75 : 1);
+    const vol = Math.min(0.16, 0.07 + n * 0.006);
+    tone({ f, f2: f * 1.02, type: 'sine', dur: 0.16, vol, attack: 0.004 });
+    tone({ f: f * 2, type: 'triangle', dur: 0.07, vol: vol * 0.35, attack: 0.002 });
+    if (enemy) noise({ dur: 0.06, vol: 0.06, from: 2500, to: 900, type: 'bandpass', q: 2 });
+  },
   tap() { if (throttle('tap', 40)) tone({ f: 620, f2: 480, type: 'triangle', dur: 0.06, vol: 0.12 }); },
   march() { if (!throttle('march', 120)) return; noise({ dur: 0.09, vol: 0.25, from: 900, to: 300, type: 'bandpass', q: 1.5 }); noise({ dur: 0.09, vol: 0.18, from: 700, to: 250, type: 'bandpass', q: 1.5, at: 0.09 }); },
   build() { if (!throttle('build', 150)) return; tone({ f: 180, f2: 120, type: 'square', dur: 0.08, vol: 0.12 }); tone({ f: 523, type: 'triangle', dur: 0.12, vol: 0.18, at: 0.07 }); tone({ f: 784, type: 'triangle', dur: 0.18, vol: 0.16, at: 0.14 }); },

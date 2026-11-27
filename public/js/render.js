@@ -13,19 +13,16 @@ function vnoise(x, y, scale, seed) {
   return top * (1 - sy) + bot * sy;
 }
 
+const S = 4, BORDER = 2; // fine pixels per tile; border width in fine pixels
 export class MapPainter {
   constructor() {
     this.land = getLand();
-    this.canvas = document.createElement('canvas'); this.canvas.width = W; this.canvas.height = H;
-    this.ctx = this.canvas.getContext('2d');
-    this.img = this.ctx.createImageData(W, H);
-    this.px = new Uint32Array(this.img.data.buffer);
     this.terrain = new Uint32Array(W * H);
     this.terrainRGB = new Uint8Array(W * H * 3);
     this.buildTerrain();
     this.colors = []; // per player: {fill:[r,g,b], border:[r,g,b]}
     this.owner = null; this.fallout = new Map();
-    this.dirty = true;
+    this.initHi();
   }
   buildTerrain() {
     const land = this.land;
@@ -61,29 +58,118 @@ export class MapPainter {
       this.terrainRGB[i * 3] = r; this.terrainRGB[i * 3 + 1] = g; this.terrainRGB[i * 3 + 2] = b;
       this.terrain[i] = rgba(r, g, b);
     }
-    this.px.set(this.terrain);
   }
-  setPlayers(info) { this.colors = info.map(p => { const c = hexToRgb(p.color); return { fill: c, border: c.map(v => (v * 0.55) | 0) }; }); }
-  setOwner(owner) { this.owner = owner; for (let i = 0; i < W * H; i++) this.paint(i); }
-  paint(i) {
-    const o = this.owner[i];
-    const t = i * 3; let r = this.terrainRGB[t], g = this.terrainRGB[t + 1], b = this.terrainRGB[t + 2];
-    if (o >= 0 && this.colors[o]) {
-      const x = i % W; let border = false;
-      if ((x > 0 && this.owner[i - 1] !== o) || (x < W - 1 && this.owner[i + 1] !== o) || (i >= W && this.owner[i - W] !== o) || (i < W * H - W && this.owner[i + W] !== o)) border = true;
-      const c = border ? this.colors[o].border : this.colors[o].fill, a = border ? 0.9 : 0.62;
-      r = r * (1 - a) + c[0] * a; g = g * (1 - a) + c[1] * a; b = b * (1 - a) + c[2] * a;
+  // ---- smooth drawing ----
+  // The map is drawn at S pixels per tile. Each fine pixel takes the "shape" (water, open land, or a
+  // country) that has the most weight among the 4 nearest tile centers, so staircases become
+  // straight diagonals and lone tiles become round dots instead of squares.
+  initHi() {
+    const HW = W * S, HH = H * S;
+    this.canvas = document.createElement('canvas'); this.canvas.width = HW; this.canvas.height = HH;
+    this.ctx = this.canvas.getContext('2d');
+    this.img = this.ctx.createImageData(HW, HH);
+    this.px = new Uint32Array(this.img.data.buffer);
+    this.key = new Int16Array(HW * HH);     // shape of each fine pixel: -2 water, -1 open land, else owner
+    this.tk = new Int16Array(W * H);        // shape of each tile
+    this.terrHi = new Uint8Array(HW * HH * 3);
+    // where each fine offset inside a tile sits between tile centers
+    this.OX = new Int8Array(S); this.FX = new Float32Array(S);
+    for (let u = 0; u < S; u++) { const g = (u + 0.5) / S - 0.5; this.OX[u] = g < 0 ? -1 : 0; this.FX[u] = g < 0 ? g + 1 : g; }
+    this.keyMask = new Uint8Array(W * H); this.colMask = new Uint8Array(W * H);
+    // terrain: blend the nearest tiles of the same kind (land or water), plus a little fine grain
+    for (let i = 0; i < W * H; i++) this.tk[i] = this.land[i] ? -1 : -2;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) this.keysFor(x, y);
+    const T = this.terrainRGB;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) for (let v = 0; v < S; v++) for (let u = 0; u < S; u++) {
+      const sx = x * S + u, sy = y * S + v, j = sy * HW + sx, k = this.key[j];
+      const x0 = x + this.OX[u], y0 = y + this.OX[v], fx = this.FX[u], fy = this.FX[v];
+      let r = 0, g = 0, b = 0, tw = 0;
+      for (let c = 0; c < 4; c++) {
+        const tx = Math.max(0, Math.min(W - 1, x0 + (c & 1))), ty = Math.max(0, Math.min(H - 1, y0 + (c >> 1))), i = ty * W + tx;
+        if ((this.land[i] ? -1 : -2) !== k) continue;
+        const ww = ((c & 1) ? fx : 1 - fx) * ((c >> 1) ? fy : 1 - fy) + 1e-6;
+        r += T[i * 3] * ww; g += T[i * 3 + 1] * ww; b += T[i * 3 + 2] * ww; tw += ww;
+      }
+      if (!tw) { const i = y * W + x; r = T[i * 3]; g = T[i * 3 + 1]; b = T[i * 3 + 2]; tw = 1; }
+      const n = (hash(j * 7 + 3) - 0.5) * (k === -1 ? 8 : 3);
+      this.terrHi[j * 3] = Math.max(0, Math.min(255, r / tw + n)); this.terrHi[j * 3 + 1] = Math.max(0, Math.min(255, g / tw + n)); this.terrHi[j * 3 + 2] = Math.max(0, Math.min(255, b / tw + n));
     }
-    if (this.fallout.has(i)) { r = r * 0.5 + 60; g = g * 0.5 + 110; b = b * 0.4 + 20; }
-    this.px[i] = rgba(r | 0, g | 0, b | 0);
-    this.dirty = true;
+    this.dirtyTiles = []; this.box = null;
   }
-  repaintAround(i) {
-    this.paint(i); const x = i % W;
-    if (x > 0) this.paint(i - 1); if (x < W - 1) this.paint(i + 1);
-    if (i >= W) this.paint(i - W); if (i < W * H - W) this.paint(i + W);
+  // shapes of the S*S fine pixels inside tile (x, y), from this.tk
+  keysFor(x, y) {
+    const HW = W * S, tk = this.tk, own = tk[y * W + x], key = this.key;
+    for (let v = 0; v < S; v++) {
+      const y0 = y + this.OX[v], fy = this.FX[v], ya = Math.max(0, y0), yb = Math.min(H - 1, y0 + 1);
+      for (let u = 0; u < S; u++) {
+        const x0 = x + this.OX[u], fx = this.FX[u], xa = Math.max(0, x0), xb = Math.min(W - 1, x0 + 1);
+        const k0 = tk[ya * W + xa], k1 = tk[ya * W + xb], k2 = tk[yb * W + xa], k3 = tk[yb * W + xb];
+        const w0 = (1 - fx) * (1 - fy), w1 = fx * (1 - fy), w2 = (1 - fx) * fy, w3 = fx * fy;
+        // weight of each corner's shape; ties go to this tile's own shape
+        let best = own, bw = (k0 === own ? w0 : 0) + (k1 === own ? w1 : 0) + (k2 === own ? w2 : 0) + (k3 === own ? w3 : 0) + 1e-6;
+        if (k0 !== own) { const s = w0 + (k1 === k0 ? w1 : 0) + (k2 === k0 ? w2 : 0) + (k3 === k0 ? w3 : 0); if (s > bw) { bw = s; best = k0; } }
+        if (k1 !== own && k1 !== k0) { const s = w1 + (k2 === k1 ? w2 : 0) + (k3 === k1 ? w3 : 0); if (s > bw) { bw = s; best = k1; } }
+        if (k2 !== own && k2 !== k0 && k2 !== k1) { const s = w2 + (k3 === k2 ? w3 : 0); if (s > bw) { bw = s; best = k2; } }
+        if (k3 !== own && k3 !== k0 && k3 !== k1 && k3 !== k2) { if (w3 > bw) { bw = w3; best = k3; } }
+        key[(y * S + v) * HW + x * S + u] = best;
+      }
+    }
   }
-  flush() { if (this.dirty) { this.ctx.putImageData(this.img, 0, 0); this.dirty = false; } }
+  // colors of the S*S fine pixels inside tile (x, y)
+  colorFor(x, y) {
+    const HW = W * S, HH = H * S, key = this.key, B = BORDER, px = this.px, T = this.terrHi;
+    const fall = this.fallout.size && this.fallout.has(y * W + x);
+    for (let v = 0; v < S; v++) for (let u = 0; u < S; u++) {
+      const sx = x * S + u, sy = y * S + v, j = sy * HW + sx, o = key[j];
+      let r = T[j * 3], g = T[j * 3 + 1], b = T[j * 3 + 2];
+      if (o >= 0) {
+        let edge = false;
+        for (let d = 1; d <= B && !edge; d++) {
+          if ((sx - d >= 0 && key[j - d] !== o) || (sx + d < HW && key[j + d] !== o) || (sy - d >= 0 && key[j - d * HW] !== o) || (sy + d < HH && key[j + d * HW] !== o)) edge = true;
+        }
+        const c = edge ? this.colors[o].border : this.colors[o].fill, a = edge ? 0.9 : 0.62;
+        r = r * (1 - a) + c[0] * a; g = g * (1 - a) + c[1] * a; b = b * (1 - a) + c[2] * a;
+      }
+      if (fall) { r = r * 0.5 + 60; g = g * 0.5 + 110; b = b * 0.4 + 20; }
+      px[j] = rgba(r | 0, g | 0, b | 0);
+    }
+  }
+  tileKey(i) { if (!this.land[i]) return -2; const o = this.owner ? this.owner[i] : -1; return o >= 0 && this.colors[o] ? o : -1; }
+  setPlayers(info) { this.colors = info.map(p => { const c = hexToRgb(p.color); return { fill: c, border: c.map(v => (v * 0.55) | 0) }; }); }
+  setOwner(owner) {
+    this.owner = owner; this.dirtyTiles.length = 0;
+    for (let i = 0; i < W * H; i++) this.tk[i] = this.tileKey(i);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) this.keysFor(x, y);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) this.colorFor(x, y);
+    this.box = [0, 0, W - 1, H - 1];
+  }
+  paint(i) { this.dirtyTiles.push(i); }
+  repaintAround(i) { this.dirtyTiles.push(i); }
+  flush() {
+    const d = this.dirtyTiles;
+    if (d.length) {
+      // a tile's shape reaches fine pixels in its 8 neighbors; borders reach one tile further
+      const km = this.keyMask, cm = this.colMask, keys = [], cols = [];
+      let bx0 = W, by0 = H, bx1 = -1, by1 = -1;
+      for (const i of d) {
+        this.tk[i] = this.tileKey(i);
+        const x = i % W, y = (i / W) | 0;
+        for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+          const tx = x + dx, ty = y + dy; if (tx < 0 || ty < 0 || tx >= W || ty >= H) continue;
+          const t = ty * W + tx;
+          if (dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1 && !km[t]) { km[t] = 1; keys.push(t); }
+          if (!cm[t]) { cm[t] = 1; cols.push(t); }
+        }
+        if (x - 2 < bx0) bx0 = x - 2; if (y - 2 < by0) by0 = y - 2; if (x + 2 > bx1) bx1 = x + 2; if (y + 2 > by1) by1 = y + 2;
+      }
+      d.length = 0;
+      for (const t of keys) { km[t] = 0; this.keysFor(t % W, (t / W) | 0); }
+      for (const t of cols) { cm[t] = 0; this.colorFor(t % W, (t / W) | 0); }
+      const b = this.box; bx0 = Math.max(0, bx0); by0 = Math.max(0, by0); bx1 = Math.min(W - 1, bx1); by1 = Math.min(H - 1, by1);
+      this.box = b ? [Math.min(b[0], bx0), Math.min(b[1], by0), Math.max(b[2], bx1), Math.max(b[3], by1)] : [bx0, by0, bx1, by1];
+    }
+    if (this.box) { const [x0, y0, x1, y1] = this.box; this.ctx.putImageData(this.img, 0, 0, x0 * S, y0 * S, (x1 - x0 + 1) * S, (y1 - y0 + 1) * S); this.box = null; }
+  }
 }
 
 // ---------- vector art ----------
@@ -158,6 +244,14 @@ const ART = {
     if (lv >= 2) { ctx.lineWidth = 0.08; ctx.beginPath(); ctx.arc(0, 0, 0.36, 0, 7); ctx.stroke(); }
     ctx.lineWidth = 0.1; for (const [a, b] of [[0, -0.85], [0, 0.85], [-0.85, 0], [0.85, 0]]) { ctx.beginPath(); ctx.moveTo(a * 0.55, b * 0.55); ctx.lineTo(a, b); ctx.stroke(); }
     dot(ctx, 0, 0, lv === 3 ? 0.16 : 0.12, lv === 3 ? GOLD : W1);
+  },
+  military(ctx, lv) {
+    // rank chevrons: one per level, a star at level 3
+    ctx.strokeStyle = W1; ctx.lineWidth = 0.2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    const top = lv === 1 ? -0.15 : lv === 2 ? -0.35 : -0.25;
+    for (let k = 0; k < lv; k++) { const y = top + k * 0.36; ctx.beginPath(); ctx.moveTo(-0.55, y); ctx.lineTo(0, y + 0.38); ctx.lineTo(0.55, y); ctx.stroke(); }
+    ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
+    if (lv === 3) star(ctx, 0, -0.68, 0.24);
   },
   radar(ctx, lv) {
     // dish on a stand with signal arcs

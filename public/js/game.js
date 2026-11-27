@@ -8,10 +8,10 @@ const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(n >= 1e5 ? 0 : 1) + 'k' : Math.floor(n).toLocaleString();
 const FALLOUT_TICKS = { bigone: 900, hydrogen: 600, mini: 150, atomic: 350, cluster: 150 };
-const BUILD_TYPES = ['city', 'factory', 'outpost', 'port', 'battery', 'silo', 'radar', 'ship'];
+const BUILD_TYPES = ['city', 'military', 'factory', 'outpost', 'port', 'battery', 'silo', 'radar', 'ship'];
 const BOMB_ORDER = Object.keys(BOMBS).sort((a, b) => BOMBS[a].cost - BOMBS[b].cost);
-const ICON = { capital: '🏰', city: '🏙️', factory: '🏭', port: '⚓', outpost: '🛡️', silo: '🚀', battery: '🎯', radar: '📡', ship: '🚢', atomic: '☢️', hydrogen: '💥', cluster: '🎆', bigone: '🌋', emp: '⚡' };
-const SHORT = { city: 'More people', factory: 'Most money', outpost: 'Defense + range', port: 'Boats + money', battery: 'Shoots missiles', silo: 'Launch bombs', radar: 'Better batteries', ship: 'Navy', atomic: 'Medium blast', cluster: 'Splits in 8', hydrogen: 'Huge blast', bigone: 'Biggest bomb', emp: 'Shuts buildings' };
+const ICON = { capital: '🏰', military: '🎖️', city: '🏙️', factory: '🏭', port: '⚓', outpost: '🛡️', silo: '🚀', battery: '🎯', radar: '📡', ship: '🚢', atomic: '☢️', hydrogen: '💥', cluster: '🎆', bigone: '🌋', emp: '⚡' };
+const SHORT = { military: 'More troops', city: 'More people', factory: 'Most money', outpost: 'Defense + range', port: 'Boats + money', battery: 'Shoots missiles', silo: 'Launch bombs', radar: 'Better batteries', ship: 'Navy', atomic: 'Medium blast', cluster: 'Splits in 8', hydrogen: 'Huge blast', bigone: 'Biggest bomb', emp: 'Shuts buildings' };
 const SVG = {
   trophy: '<svg viewBox="0 0 24 24"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4"/></svg>',
   chat: '<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>',
@@ -296,7 +296,9 @@ export class ClientGame {
     if (p.pi) { this.info = p.pi; this.painter.setPlayers(this.info); this.painter.setOwner(this.owner); }
     if (p.dip) { this.setDiplomacy(p.dip); this.lbKey = ''; }
     const ch = p.ch;
-    for (let k = 0; k < ch.length; k += 2) this.owner[ch[k]] = ch[k + 1];
+    let gained = 0, took = 0;
+    for (let k = 0; k < ch.length; k += 2) { if (ch[k + 1] === this.you && this.owner[ch[k]] !== this.you) { gained++; if (this.owner[ch[k]] >= 0) took++; } this.owner[ch[k]] = ch[k + 1]; }
+    if (gained && this.phase === 'play') sfx.expand(gained, took > 0);
     for (let k = 0; k < ch.length; k += 2) this.painter.repaintAround(ch[k]);
     if (this.painter.fallout.size && dt > 0) {
       for (const [i, t] of this.painter.fallout) { if (t <= dt) { this.painter.fallout.delete(i); this.painter.paint(i); } else this.painter.fallout.set(i, t - dt); }
@@ -315,6 +317,34 @@ export class ClientGame {
     }
     for (const e of p.ev) this.onEvent(e);
     this.updateHud();
+  }
+  // troops a country has out fighting (attacks and boats), which are not at home defending
+  awayOf(i) { let n = 0; for (const a of this.attacks) if (a.a === i && a.t >= 0) n += a.n; for (const b of this.boats) if (b.o === i) n += b.n; return n; }
+  // armies marching from the heart of a country to its front line, with a count badge at the front
+  drawArmies(ctx, px, now) {
+    for (const a of this.attacks) {
+      if (a.t < 0 || a.x === undefined || a.n < 1) continue;
+      const st = this.stats[a.a], inf = this.info[a.a]; if (!st || st.cx < 0 || !inf) continue;
+      const mine = a.a === this.you || a.t === this.you;
+      const x1 = st.cx + 0.5, y1 = st.cy + 0.5, x2 = a.x + 0.5, y2 = a.y + 0.5;
+      const len = Math.hypot(x2 - x1, y2 - y1);
+      ctx.globalAlpha = mine ? 1 : 0.55;
+      if (len > 3) {
+        const gap = Math.max(10 * px, len / 14), off = ((now / 900) * 30 * px) % gap, r = (mine ? 3.2 : 2.4) * px;
+        ctx.fillStyle = inf.color; ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.2 * px;
+        for (let d = off; d < len; d += gap) {
+          const q = d / len, x = x1 + (x2 - x1) * q, y = y1 + (y2 - y1) * q;
+          ctx.beginPath(); ctx.arc(x, y, r * (0.6 + 0.4 * q), 0, 7); ctx.fill(); ctx.stroke();
+        }
+      }
+      const label = '⚔️ ' + fmt(a.n); ctx.font = `900 ${(mine ? 12 : 10) * px}px Nunito, system-ui`;
+      const tw = ctx.measureText(label).width + 12 * px, h = (mine ? 18 : 15) * px;
+      ctx.fillStyle = inf.color; ctx.strokeStyle = a.t === this.you ? '#ff4d6d' : 'rgba(255,255,255,0.9)'; ctx.lineWidth = (a.t === this.you ? 2.5 : 1.5) * px;
+      ctx.beginPath(); ctx.roundRect(x2 - tw / 2, y2 - h / 2, tw, h, h / 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = 'rgba(0,0,0,.5)'; ctx.lineWidth = 2.5 * px; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.strokeText(label, x2, y2 + px * 0.5); ctx.fillText(label, x2, y2 + px * 0.5);
+      ctx.globalAlpha = 1;
+    }
   }
   flyTo(x, y, s) { this.fly = { x0: this.cam.x, y0: this.cam.y, s0: this.cam.s, x, y, s: s || this.cam.s, t0: performance.now() }; }
 
@@ -362,7 +392,8 @@ export class ClientGame {
       $('.flag', r).style.background = info.color;
       $('.n-name', r).textContent = info.country;
       $('.n-sub', r).textContent = me.alive ? `${(me.tiles / this.landCount * 100).toFixed(1)}% of the world` : 'Fallen';
-      $('.s-troops', r).textContent = fmt(me.troops);
+      const away = this.awayOf(this.you);
+      $('.s-troops', r).textContent = away ? `${fmt(me.troops)} · ⚔️${fmt(away)}` : fmt(me.troops);
       $('.s-bar', r).style.width = Math.min(100, me.troops / Math.max(1, me.max) * 100) + '%';
       $('.s-money', r).textContent = '$' + fmt(me.money); $('.s-inc', r).textContent = `+${fmt(me.inc)}/s`;
       $('.ratio-n', r).textContent = fmt(me.troops * this.ratio);
@@ -590,8 +621,8 @@ export class ClientGame {
     ctx.fillStyle = '#07101f'; ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
     let shx = 0, shy = 0; if (this.shake > 0.2) { shx = (Math.random() - 0.5) * this.shake; shy = (Math.random() - 0.5) * this.shake; this.shake *= 0.92; }
     ctx.setTransform(s * dpr, 0, 0, s * dpr, (this.vw / 2 - this.cam.x * s + shx) * dpr, (this.vh / 2 - this.cam.y * s + shy) * dpr);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(this.painter.canvas, 0, 0);
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(this.painter.canvas, 0, 0, W, H);
     const px = 1 / s; // one screen pixel in world units
 
     // supply range: always faint, bright while building or right after a hint
@@ -645,7 +676,8 @@ export class ClientGame {
       const label = this.isAlly(i) ? '🤝 ' + inf.country : inf.country;
       ctx.strokeText(label, st.cx + 0.5, st.cy + 0.5); ctx.fillText(label, st.cx + 0.5, st.cy + 0.5);
       ctx.font = `800 ${fs * 0.62}px Nunito, system-ui, sans-serif`;
-      const line = fmt(st.troops);
+      const away = this.awayOf(i);
+      const line = away ? `${fmt(st.troops)} · ⚔️ ${fmt(away)} away` : fmt(st.troops);
       ctx.lineWidth = fs * 0.16; ctx.strokeText(line, st.cx + 0.5, st.cy + 0.5 + fs * 0.85); ctx.fillText(line, st.cx + 0.5, st.cy + 0.5 + fs * 0.85);
     });
 
@@ -653,6 +685,7 @@ export class ClientGame {
     const f = Math.min(1, (now - this.lastPatchAt) / TICK_MS);
     if (s < 2.2) { for (const b of this.buildings) drawDot(ctx, b, this.info[b.owner]?.color || '#888', 5 * px); }
     else { const size = Math.min(48 * px, Math.max(26 * px, 2.4)); for (const b of this.buildings) drawBuilding(ctx, b, this.info[b.owner]?.color || '#888', b.owner === this.you || b.type === 'capital' ? size : size * 0.8, b.owner === this.you); }
+    this.drawArmies(ctx, px, now);
     const lerp = (cur, prev) => prev ? { ...cur, x: prev.x + (cur.x - prev.x) * f, y: prev.y + (cur.y - prev.y) * f } : cur;
     for (const sh of this.ships) drawShip(ctx, lerp(sh, this.prev.ships.get(sh.id)), this.info[sh.o]?.color || '#888', Math.min(60 * px, Math.max(32 * px, 2.8)), now);
     for (const bt0 of this.boats) {
@@ -721,6 +754,7 @@ function statLine(type, lv) {
     case 'capital': return `+${fmt(CAPITAL.maxTroops)} max people, +${CAPITAL.growth} growth, supply range ${CAPITAL.supply}. Lose it and it's gone for good.`;
     case 'city': return `+${fmt(S.maxTroops[lv])} max people, +${S.growth[lv]}/s growth, +$${S.money[lv]}/s, supply ${S.supply[lv]}`;
     case 'factory': return `+$${S.money[lv]}/s`;
+    case 'military': return `+${Math.round(S.growth[lv] * 100)}% troop growth, +${fmt(S.maxTroops[lv])} max troops`;
     case 'port': return `+$${S.money[lv]}/s, faster boats, supply ${S.supply[lv]}`;
     case 'outpost': return `Land within ${S.radius[lv]} is ${S.defense[lv]}x harder to take, supply ${S.supply[lv]}`;
     case 'silo': return `Reloads in ${S.cooldown[lv] / 10}s · ${Object.values(BOMBS).filter(b => b.silo === lv).map(b => b.name).join(', ')} unlocked`;

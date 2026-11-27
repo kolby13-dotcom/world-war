@@ -6,19 +6,21 @@ export const BUILDINGS = {
   factory: { name: 'Factory',    cost: 4000, desc: 'Makes lots of money', coastal: false },
   port:    { name: 'Port',       cost: 2000, desc: 'Faster boats, trade money, builds battleships', coastal: true },
   outpost: { name: 'Outpost',    cost: 1500, desc: 'Makes nearby land much harder to invade', coastal: false },
+  military: { name: 'Military Base', cost: 3000, desc: 'Trains troops faster and houses more of them', coastal: false },
   silo:    { name: 'Missile Silo', cost: 15000, desc: 'Launches bombs. Higher levels unlock bigger bombs', coastal: false },
   battery: { name: 'Battery',    cost: 9000, desc: 'Shoots down enemy missiles in range', coastal: false },
   radar:   { name: 'Radar',      cost: 4000, desc: 'Warns you of incoming missiles and boosts nearby batteries', coastal: false },
 };
 // The capital is placed for free where you start. It can't be built or upgraded.
-export const CAPITAL = { name: 'Capital', maxTroops: 2500, growth: 10, money: 4, supply: 16 };
+export const CAPITAL = { name: 'Capital', maxTroops: 2500, growth: 10, money: 8, supply: 16 };
 export const SHIP = { name: 'Battleship', cost: 6000, desc: 'Built from a port. Sinks boats, shells the coast' };
 export const UPGRADE_MULT = [0, 0, 1.5, 3]; // cost of reaching level 2 / 3 as multiple of base
 
 export const LEVEL_STATS = {
-  city:    { maxTroops: [0, 3000, 7000, 15000], growth: [0, 12, 26, 45], money: [0, 3, 6, 12], supply: [0, 12, 16, 22] },
-  factory: { money: [0, 10, 24, 50] },
-  port:    { money: [0, 4, 8, 14], boatSpeed: [0, 0.12, 0.24, 0.38], supply: [0, 8, 10, 13] },
+  city:    { maxTroops: [0, 3000, 7000, 15000], growth: [0, 12, 26, 45], money: [0, 5, 10, 18], supply: [0, 12, 16, 22] },
+  factory: { money: [0, 16, 36, 75] },
+  port:    { money: [0, 6, 12, 20], boatSpeed: [0, 0.12, 0.24, 0.38], supply: [0, 8, 10, 13] },
+  military: { growth: [0, 0.3, 0.6, 1.0], maxTroops: [0, 2000, 5000, 10000] }, // growth: extra troop growth (0.3 = +30%)
   outpost: { radius: [0, 10, 14, 18], defense: [0, 1.8, 2.6, 3.5], supply: [0, 9, 12, 16] },
   silo:    { cooldown: [0, 200, 120, 60] },               // ticks between launches
   battery: { radius: [0, 16, 22, 30], chance: [0, 0.5, 0.7, 0.85], cooldown: [0, 60, 40, 25] },
@@ -40,13 +42,19 @@ export const ECON = {
   startMoney: 1000,
   baseMaxTroops: 600,
   maxTroopsPerTile: 3,
-  baseMoney: 2,
-  moneyPerTile: 0.03,
+  baseMoney: 5,
+  moneyPerTile: 0.05,
+  workerMoney: 0.25,      // income from people at home: workerMoney * sqrt(home troops) per second
+  enclaveMax: 400,        // unclaimed pockets up to this many tiles, walled in by one country, join it
+  enclaveRate: 3,         // tiles per second taken from an enemy pocket walled in by your land
   neutralCost: 4,
   outOfSupplyCost: 3,     // land beyond your supply range costs this many times more people
   outOfSupplySpeed: 0.4,  // ...and is taken this much slower
-  boatSpeed: 0.32,        // tiles per tick
-  counterBonus: 1.5,      // troops sent against an incoming attack count this much more
+  boatSpeed: 0.42,        // tiles per tick
+  counterBonus: 1.25,     // troops sent against an incoming attack count this much more
+  attackSpeed: 1.6,       // overall pace of land being taken
+  growthSpeed: 1.3,       // overall pace of troop growth
+  militaryMaxBonus: 2,    // military bases can at most triple troop growth
   spawnRadius: 3,
   maxBoats: 4,
 };

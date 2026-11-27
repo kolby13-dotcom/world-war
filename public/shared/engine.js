@@ -141,8 +141,10 @@ export class Engine {
         if (b.type === 'capital' && pidx >= 0) {
           // losing your capital is a crushing blow: half your people scatter
           const v = this.players[b.owner];
-          this.events.push({ k: 'msg', text: `${this.players[pidx].country} captured the capital of ${v.country}!`, kind: 'warn' });
+          this.events.push({ k: 'msg', text: `${this.players[pidx].country} captured the capital of ${v.country}! Half their people scattered.`, kind: 'warn' });
           this.players[pidx].money += 2000; v.troops *= 0.5; v.lostCapital = true;
+          for (const a of this.attacks) if (a.a === v.idx) a.troops *= 0.5;
+          for (const bt of this.boats) if (bt.owner === v.idx) bt.troops *= 0.5;
         }
         this.destroyBuilding(b);
       }
@@ -357,7 +359,7 @@ export class Engine {
       if (!p.alive) { atk.done = true; continue; }
       const enemy = atk.t >= 0 ? this.players[atk.t] : null;
       const sup = this.supply[atk.a];
-      let rate = (0.22 + Math.sqrt(atk.troops) / 30);
+      let rate = (0.22 + Math.sqrt(atk.troops) / 30) * ECON.attackSpeed;
       if (enemy) {
         const dens = Math.max(2, enemy.troops / Math.max(1, enemy.tiles.length));
         // big armies roll forward fast, small ones stall: wars end instead of grinding on
@@ -384,7 +386,7 @@ export class Engine {
         if (enemy) {
           const dens = enemy.troops / Math.max(1, enemy.tiles.length);
           cost = Math.max(3, dens * 1.3) * this.defenseMult(best, atk.t, atk.a);
-          if (reclaim) cost *= 0.5;
+          if (reclaim) cost *= 0.7;
           if (atk.counter) cost *= 0.75;
           loss = Math.max(1, dens * 0.8);
         }
@@ -393,7 +395,7 @@ export class Engine {
         atk.acc -= weight;
         atk.troops -= cost;
         if (enemy) enemy.troops = Math.max(0, enemy.troops - loss);
-        this.setOwner(best, atk.a);
+        this.setOwner(best, atk.a); atk.lx = best % W; atk.ly = (best / W) | 0;
         for (const m of this.nb(best)) if (this.owner[m] === atk.t && this.land[m]) atk.cand.add(m);
       }
       if (!atk.cand.size) atk.done = true;
@@ -629,7 +631,7 @@ export class Engine {
   economy() {
     const dt = 1 / TPS;
     const cityL = new Map();
-    for (const p of this.players) { p._city = 0; p._cityG = 0; p._money = 0; }
+    for (const p of this.players) { p._city = 0; p._cityG = 0; p._money = 0; p._mil = 0; }
     for (const b of this.buildings) {
       if (b.cd > 0) b.cd--;
       if (b.disabled > this.tick) continue;
@@ -637,6 +639,7 @@ export class Engine {
       if (b.type === 'capital') { p._city += CAPITAL.maxTroops; p._cityG += CAPITAL.growth; p._money += CAPITAL.money; }
       else if (b.type === 'city') { p._city += LS.city.maxTroops[b.level]; p._cityG += LS.city.growth[b.level]; p._money += LS.city.money[b.level]; }
       else if (b.type === 'factory') p._money += LS.factory.money[b.level];
+      else if (b.type === 'military') { p._mil += LS.military.growth[b.level]; p._city += LS.military.maxTroops[b.level]; }
       else if (b.type === 'port') p._money += LS.port.money[b.level];
     }
     for (const p of this.players) {
@@ -647,10 +650,10 @@ export class Engine {
       const base = 3 + Math.sqrt(t) * 0.8 + p._cityG;
       const room = Math.max(0, 1 - p.troops / p.maxTroops);
       const eco = p.isBot ? this.diff.eco : 1;
-      p.growth = base * 4 * room * this.settings.speed * eco;
+      p.growth = base * 4 * room * this.settings.speed * eco * ECON.growthSpeed * (1 + Math.min(ECON.militaryMaxBonus, p._mil));
       p.troops = Math.min(p.maxTroops, p.troops + p.growth * dt);
       if (p.troops > p.maxTroops) p.troops -= (p.troops - p.maxTroops) * 0.02;
-      p.income = (ECON.baseMoney + t * ECON.moneyPerTile + p._money) * this.settings.speed * eco;
+      p.income = (ECON.baseMoney + t * ECON.moneyPerTile + p._money + ECON.workerMoney * Math.sqrt(Math.max(0, p.troops))) * this.settings.speed * eco;
       p.money += p.income * dt;
     }
     void cityL;
@@ -741,6 +744,7 @@ export class Engine {
       this.economy();
       for (const p of this.players) if (p.alive && p.isBot) { if (p.tribe) this.tribeThink(p); else botThink(this, p); }
       if (this.settings.tribes && this.tick >= this.nextTribeAt) { this.nextTribeAt = this.tick + (35 + Math.random() * 40) * TPS; if (this.playStart !== this.tick) this.spawnTribe(); }
+      if (this.tick % TPS === 0) this.fillEnclaves();
       this.stepAttacks();
       this.stepBoats();
       this.stepShips();
@@ -748,6 +752,40 @@ export class Engine {
       this.checkEnd();
     }
     return this.makePatch();
+  }
+
+  // Pockets walled in by one country (its land, plus coast) join it: unclaimed land all at once,
+  // another country's land a few tiles every second, starting from the edges.
+  fillEnclaves() {
+    const seen = this.enclaveSeen || (this.enclaveSeen = new Uint8Array(N)); seen.fill(0);
+    const q = this.enclaveQ || (this.enclaveQ = new Int32Array(N));
+    for (let s0 = 0; s0 < N; s0++) {
+      if (seen[s0] || !this.land[s0]) continue;
+      const own = this.owner[s0];
+      let head = 0, tail = 0, who = -1, mixed = false, fall = false, mine = 0, coast = 0, capital = false;
+      q[tail++] = s0; seen[s0] = 1;
+      while (head < tail) {
+        const i = q[head++], x = i % W;
+        if (this.fallout[i]) fall = true;
+        if (own >= 0 && this.buildingAt.get(i)?.type === 'capital') capital = true;
+        for (const n of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i >= W ? i - W : -1, i < N - W ? i + W : -1]) {
+          if (n < 0 || !this.land[n]) { coast++; continue; }
+          const o = this.owner[n];
+          if (o === own) { if (!seen[n]) { seen[n] = 1; q[tail++] = n; } continue; }
+          if (who === -1) who = o; else if (o !== who) mixed = true;
+          mine++;
+        }
+      }
+      const p = who >= 0 ? this.players[who] : null;
+      if (!p || mixed || p.tribe || !p.alive || tail > ECON.enclaveMax || mine < coast) continue;
+      if (own === -1) { if (!fall) for (let k = 0; k < tail; k++) this.setOwner(q[k], who); continue; }
+      // someone else's pocket: no capitals, not allies; eat inward from the edge
+      if (capital || this.allied(who, own)) continue;
+      let take = Math.ceil(ECON.enclaveRate + tail * 0.05);
+      const edge = [];
+      for (let k = 0; k < tail; k++) { const i = q[k]; if (this.nb(i).some(n => this.owner[n] === who)) edge.push(i); }
+      for (const i of edge) { if (take-- <= 0) break; this.setOwner(i, who); }
+    }
   }
 
   playerStats() {
@@ -770,7 +808,7 @@ export class Engine {
       ms: this.missiles.map(m => ({ id: m.id, o: m.owner, type: m.type, fx: m.fx, fy: m.fy, tx: m.tx, ty: m.ty, p: +(m.t / m.dur).toFixed(3) })),
       ships: this.ships.map(s => ({ id: s.id, o: s.owner, x: +s.x.toFixed(2), y: +s.y.toFixed(2), a: +s.ang.toFixed(2), level: s.level, hp: s.hp, moving: s.wp.length > 1 })),
       ev: this.events,
-      atk: this.attacks.map(a => ({ a: a.a, t: a.t, n: Math.floor(a.troops) })),
+      atk: this.attacks.map(a => ({ a: a.a, t: a.t, n: Math.floor(a.troops), x: a.lx ?? a.fx, y: a.ly ?? a.fy })),
     };
     if (this.buildingsDirty) { patch.bl = this.buildingList(); this.buildingsDirty = false; }
     if (this.infoDirty) { patch.pi = this.playerInfo(); this.infoDirty = false; }

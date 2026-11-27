@@ -131,6 +131,7 @@ export function botThink(g, p) {
   if (outOfRange) want.push('city', 'city', 'outpost');
   if (cities < p.tiles.length / 120 + 1) want.push('city');
   if (facs < cities) want.push('factory');
+  if (minutes > 1 && g.countOf(p, 'military') < 1 + p.tiles.length / 800) want.push('military');
   if (coast.length && g.countOf(p, 'port') < 1 + p.tiles.length / 600) want.push('port');
   if (minutes > 2 && g.countOf(p, 'battery') < 1 + facs / 3) want.push('battery');
   if (minutes > 3 && g.countOf(p, 'silo') < 1 + (minutes > 8 ? 1 : 0)) want.push('silo');
