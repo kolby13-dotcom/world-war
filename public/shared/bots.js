@@ -103,7 +103,15 @@ export function botThink(g, p) {
       const myD = p.troops / Math.max(1, p.tiles.length);
       const theirs = best && g.players[g.owner[best[0]]], theirD = theirs ? theirs.troops / Math.max(1, theirs.tiles.length) : 0;
       if (best && (finish || myD > theirD * (1.4 - s.aggr) || Math.random() < 0.1 * s.aggr)) {
-        g.handle(p.id, { type: 'attack', tile: best[(Math.random() * best.length) | 0], ratio: finish ? 0.6 : 0.4 + 0.2 * s.aggr });
+        let tile = best[(Math.random() * best.length) | 0];
+        // land guarded by an outpost: go straight for the outpost instead
+        const owner = g.owner[tile], tx = tile % W, ty = (tile / W) | 0;
+        if (g.outpostGuard(tile, owner) > 1) {
+          let ob = null, od = Infinity;
+          for (const b of g.buildings) if (b.type === 'outpost' && b.owner === owner) { const d = (b.x - tx) ** 2 + (b.y - ty) ** 2; if (d < od) { od = d; ob = b; } }
+          if (ob) tile = ob.tile;
+        }
+        g.handle(p.id, { type: 'attack', tile, ratio: finish ? 0.6 : 0.4 + 0.2 * s.aggr });
         acted = true;
       }
     }

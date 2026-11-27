@@ -195,7 +195,7 @@ function renderLobby() {
   const isHost = l.host === state.user.username;
   $('#lobby-code').innerHTML = [...l.code].map(c => `<span>${esc(c)}</span>`).join('');
   $('#lobby-title').textContent = l.settings.name;
-  $('#lobby-count').textContent = `${l.members.length} + ${l.settings.bots} ${l.settings.botLevel || 'medium'} bots`;
+  $('#lobby-count').textContent = `${l.members.length} + ${l.settings.bots} ${l.settings.botLevel || 'medium'} bots${l.settings.mode === 'takeover' ? ' · Full World Takeover' : ''}`;
   $('#settings-note').textContent = isHost ? 'You\'re the leader' : 'Leader only';
   $('#lobby-members').innerHTML = l.members.map(m => `<div class="member ${m.online ? '' : 'away'}" style="--c:${m.color}">
       ${avatarHtml(m.username, m.av, 'sm')}
@@ -212,6 +212,8 @@ function renderLobby() {
     el.disabled = !isHost;
     if (el.type === 'range') paintRange(el);
     const out = el.parentElement.querySelector('output'); if (out) out.textContent = fmtSetting(el.dataset.s, v);
+    // Full World Takeover always needs 100%
+    if (el.dataset.s === 'winPercent' && l.settings.mode === 'takeover') { el.disabled = true; if (out) out.textContent = '100%'; }
   }
   const me = l.members.find(m => m.username === state.user.username);
   for (const b of document.querySelectorAll('#colors .swatch')) { b.classList.toggle('mine', me?.color === b.dataset.c); b.disabled = l.members.some(m => m.color === b.dataset.c && m !== me); }
@@ -261,6 +263,10 @@ function setupPractice() {
     for (const o of document.querySelectorAll('#practice-money-chips .chip')) o.classList.toggle('on', o === c);
     $('#practice-money').value = c.dataset.v;
   };
+  for (const c of document.querySelectorAll('#practice-mode-chips .chip')) c.onclick = () => {
+    for (const o of document.querySelectorAll('#practice-mode-chips .chip')) o.classList.toggle('on', o === c);
+    $('#practice-mode').value = c.dataset.v;
+  };
   for (const c of document.querySelectorAll('#practice-level-chips .chip')) c.onclick = () => {
     for (const o of document.querySelectorAll('#practice-level-chips .chip')) o.classList.toggle('on', o === c);
     $('#practice-level').value = c.dataset.v; store.set('bot_level', c.dataset.v);
@@ -272,16 +278,16 @@ function setupPractice() {
     store.set('offline_name', name);
     $('#practice-modal').classList.add('hidden');
     requestLandscape();
-    const nb = +bots.value, money = +$('#practice-money').value, level = $('#practice-level').value;
-    let n = 5; const tick = () => { countdown(n); if (n === 0) return startPractice(name, nb, money, level); n--; setTimeout(tick, 1000); }; tick();
+    const nb = +bots.value, money = +$('#practice-money').value, level = $('#practice-level').value, mode = $('#practice-mode').value;
+    let n = 5; const tick = () => { countdown(n); if (n === 0) return startPractice(name, nb, money, level, mode); n--; setTimeout(tick, 1000); }; tick();
   };
 }
 const BOT_NAMES = ['Atlas', 'Boreal', 'Cobalt', 'Dune', 'Ember', 'Falcon', 'Granite', 'Harbor', 'Iris', 'Juniper', 'Kestrel', 'Lumen', 'Monsoon', 'Nova', 'Onyx', 'Pike', 'Quartz', 'Raven', 'Sable'];
-function startPractice(name, nb, money, botLevel = 'medium') {
+function startPractice(name, nb, money, botLevel = 'medium', mode = 'classic') {
   const names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
   const players = [{ id: 'me', name, color: COLORS[3] }];
   for (let i = 0; i < nb; i++) players.push({ id: 'bot' + i, name: names[i] + ' AI', color: COLORS.filter(c => c !== COLORS[3])[i], isBot: true, country: `Republic of ${names[i]}` });
-  const engine = new Engine({ players, settings: { spawnTime: 30, startMoney: money, botLevel } });
+  const engine = new Engine({ players, settings: { spawnTime: 30, startMoney: money, botLevel, mode } });
   show('game');
   const end = () => { clearInterval(state.offlineLoop); state.game.destroy(); state.game = null; show(state.user ? 'home' : 'auth'); };
   state.game = new ClientGame({ root: $('#game'), you: 0, snap: engine.snapshot(), username: name, send: (a) => engine.handle('me', a), onExit: end, offline: true, myId: 'me' });

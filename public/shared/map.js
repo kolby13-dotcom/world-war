@@ -28,3 +28,27 @@ function cleanSpecks(land, value, min) {
     if (q.length < min) for (const c of q) land[c] = value ^ 1;
   }
 }
+
+
+// Real-world countries ("regions"): holding every tile of one pays a steady bonus.
+import { REGION_NAMES, REGION_RLE } from './regiondata.js';
+let regCache = null;
+export function getRegions() {
+  if (regCache) return regCache;
+  const N = MAP_W * MAP_H, id = new Int16Array(N);
+  let i = 0;
+  for (let k = 0; k < REGION_RLE.length; k += 2) { id.fill(REGION_RLE[k], i, i + REGION_RLE[k + 1]); i += REGION_RLE[k + 1]; }
+  const land = getLand();
+  for (let t = 0; t < N; t++) if (!land[t]) id[t] = -1;
+  const n = REGION_NAMES.length, size = new Int32Array(n), sx = new Float64Array(n), sy = new Float64Array(n);
+  for (let t = 0; t < N; t++) { const r = id[t]; if (r < 0) continue; size[r]++; sx[r] += t % MAP_W; sy[r] += (t / MAP_W) | 0; }
+  const list = REGION_NAMES.map((name, r) => {
+    // label spot: the region's tile closest to its average position
+    const ax = sx[r] / Math.max(1, size[r]), ay = sy[r] / Math.max(1, size[r]);
+    return { name, size: size[r], bonus: Math.round(2 + Math.sqrt(size[r]) / 4), ax, ay, cx: ax, cy: ay };
+  });
+  const bd = new Float64Array(n).fill(Infinity);
+  for (let t = 0; t < N; t++) { const r = id[t]; if (r < 0) continue; const x = t % MAP_W, y = (t / MAP_W) | 0, d = (x - list[r].ax) ** 2 + (y - list[r].ay) ** 2; if (d < bd[r]) { bd[r] = d; list[r].cx = x; list[r].cy = y; } }
+  regCache = { id, list };
+  return regCache;
+}

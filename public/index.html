@@ -114,6 +114,7 @@
           <summary><h3>Game settings</h3><span class="muted" id="settings-note"></span></summary>
           <label class="field">Room name<input type="text" data-s="name" maxlength="40"></label>
           <label class="field"><span>Bot fill-ins <output></output></span><input type="range" min="0" max="15" data-s="bots"></label>
+          <label class="field">Game mode<select data-s="mode"><option value="classic">Classic (win with the land share below)</option><option value="takeover">Full World Takeover (own 100%)</option></select></label>
           <label class="field">Bot difficulty<select data-s="botLevel"><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>
           <label class="field"><span>Max players <output></output></span><input type="range" min="2" max="16" data-s="maxPlayers"></label>
           <label class="field"><span>Starting money <output></output></span><input type="range" min="0" max="20000" step="500" data-s="startMoney"></label>
@@ -149,6 +150,12 @@
   <h2>Practice against bots</h2>
   <label class="field" id="practice-name-row">Your name<input id="practice-name" maxlength="16" placeholder="Commander"></label>
   <label class="field"><span>Bots <output id="practice-bots-v">7</output></span><input type="range" id="practice-bots" min="1" max="15" value="7"></label>
+  <div class="field">Game mode
+    <div class="chips even" id="practice-mode-chips">
+      <button type="button" data-v="classic" class="chip on">Classic</button><button type="button" data-v="takeover" class="chip">Full World Takeover</button>
+    </div>
+    <input type="hidden" id="practice-mode" value="classic">
+  </div>
   <div class="field">Bot difficulty
     <div class="chips even" id="practice-level-chips">
       <button type="button" data-v="easy" class="chip">Easy</button><button type="button" data-v="medium" class="chip on">Medium</button><button type="button" data-v="hard" class="chip">Hard</button>

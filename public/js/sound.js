@@ -65,6 +65,13 @@ export const sfx = {
     tone({ f: 110 - s * 50, f2: 30, type: 'sine', dur: 0.4 + s * 1.2 + (big ? 1 : 0), vol: 0.35 + s * 0.35 });
     if (big) noise({ dur: 2.5, vol: 0.25, from: 400, to: 30, at: 0.25, attack: 0.3 });
   },
+  // a building coming down: low rumble and falling rubble
+  crumble(big = false) {
+    if (!throttle('crumble', big ? 0 : 200)) return;
+    noise({ dur: big ? 1.8 : 0.9, vol: big ? 0.4 : 0.25, from: 600, to: 60, attack: 0.02 });
+    for (let k = 0; k < (big ? 7 : 4); k++) noise({ dur: 0.08, vol: 0.12, from: 2500, to: 700, type: 'bandpass', q: 3, at: 0.15 + k * (0.09 + Math.random() * 0.08) });
+    if (big) tone({ f: 70, f2: 28, type: 'sine', dur: 1.6, vol: 0.4 });
+  },
   shot() { if (throttle('shot', 160)) tone({ f: 1400, f2: 300, type: 'square', dur: 0.07, vol: 0.05 }); },
   zap(hit) { if (throttle('zap', 150)) tone({ f: hit ? 1800 : 1200, f2: hit ? 600 : 900, type: 'sawtooth', dur: 0.12, vol: 0.06 }); },
   alarm() { if (!throttle('alarm', 6000)) return; for (let i = 0; i < 2; i++) { tone({ f: 660, type: 'square', dur: 0.12, vol: 0.07, at: i * 0.3 }); tone({ f: 494, type: 'square', dur: 0.12, vol: 0.07, at: i * 0.3 + 0.15 }); } },

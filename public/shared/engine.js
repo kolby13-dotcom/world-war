@@ -1,7 +1,7 @@
 // Authoritative game simulation. Runs on the server for online games and in the
 // browser for offline games against bots. Produces a "patch" every tick that
 // clients apply to their view of the world.
-import { MAP_W as W, MAP_H as H, getLand } from './map.js';
+import { MAP_W as W, MAP_H as H, getLand, getRegions } from './map.js';
 import { BUILDINGS, SHIP, CAPITAL, UPGRADE_MULT, LEVEL_STATS as LS, BUILDING_HP, BOMBS, ECON, TICK_MS, BOT_LEVELS } from './rules.js';
 import { botThink } from './bots.js';
 
@@ -15,11 +15,13 @@ function dist2(ax, ay, bx, by) { const dx = ax - bx, dy = ay - by; return dx * d
 
 export class Engine {
   constructor({ players, settings = {} }) {
-    this.settings = Object.assign({ spawnTime: 20, startMoney: ECON.startMoney, winPercent: 60, speed: 1, tribes: true, botLevel: 'medium' }, settings);
+    this.settings = Object.assign({ spawnTime: 20, startMoney: ECON.startMoney, winPercent: 60, speed: 1, tribes: true, botLevel: 'medium', mode: 'classic' }, settings);
+    if (this.settings.mode === 'takeover') this.settings.winPercent = 100; else this.settings.mode = 'classic';
     if (!BOT_LEVELS[this.settings.botLevel]) this.settings.botLevel = 'medium';
     this.diff = BOT_LEVELS[this.settings.botLevel];
     this.land = getLand();
     this.landCount = this.land.reduce((a, b) => a + b, 0);
+    this.regions = getRegions(); this.regHolder = new Int16Array(this.regions.list.length).fill(-1); this.regDirty = true;
     this.coastal = new Uint8Array(N);
     for (let i = 0; i < N; i++) if (this.land[i]) for (const n of this.nb(i)) if (!this.land[n]) { this.coastal[i] = 1; break; }
     this.owner = new Int16Array(N).fill(-1);
@@ -136,7 +138,13 @@ export class Engine {
     }
     const b = this.buildingAt.get(i);
     if (b) {
-      if (pidx >= 0 && b.type !== 'capital') b.owner = pidx;
+      if (pidx >= 0 && b.type !== 'capital') {
+        if (b.type === 'outpost' && old >= 0) {
+          this.msg(this.players[pidx], `You captured an outpost from ${this.players[old].country}! The land around it is yours to guard now.`, 'good');
+          this.msg(this.players[old], `${this.players[pidx].country} captured one of your outposts. The land around it is exposed.`, 'error');
+        }
+        b.owner = pidx;
+      }
       else {
         if (b.type === 'capital' && pidx >= 0) {
           // losing your capital is a crushing blow: half your people scatter
@@ -153,6 +161,7 @@ export class Engine {
     this.changes.push(i, pidx);
   }
   destroyBuilding(b) {
+    this.events.push({ k: 'boom', x: b.x, y: b.y, r: b.type === 'capital' ? 6 : 3, type: 'bld', cap: b.type === 'capital' });
     this.buildings = this.buildings.filter(o => o !== b);
     this.buildingAt.delete(b.tile);
     this.buildingsDirty = true; this.supplyDirty = true;
@@ -337,20 +346,42 @@ export class Engine {
     if (target >= 0) (p.lastHit ||= {})[target] = this.tick;
     atk.troops += troops;
     [atk.fx, atk.fy] = tileXY(focusTile);
+    // aimed at an outpost: head straight for it
+    const ob = this.assaultTarget(target, focusTile);
+    atk.assault = ob ? ob.id : null; if (ob) { atk.fx = ob.x; atk.fy = ob.y; }
     for (const i of p.tiles) for (const n of this.nb(i)) if (this.owner[n] === target && this.land[n] && (!region || region.has(n))) atk.cand.add(n);
   }
 
-  defenseMult(tile, def, atkr = -1) {
-    let m = this.supply[def][tile] ? 1.3 : 1; const [x, y] = tileXY(tile);
+  defenseMult(tile, def, atkr = -1, atk = null) {
+    let m = this.supply[def][tile] ? 1.3 : 1;
     const d = this.players[def];
     if (d.rallyUntil > this.tick && d.rallyVs === atkr) m *= 1.5;
     if (d.lostCapital) m *= 0.75;
+    return Math.max(m, this.outpostGuard(tile, def, atk));
+  }
+  // How strongly outposts guard a tile. Land in range is very hard to take, unless the attack is
+  // aimed straight at that outpost: then it drives a narrow wedge in and pays far less.
+  outpostGuard(tile, def, atk = null) {
+    const [x, y] = tileXY(tile); let g = 1;
     for (const b of this.buildings) {
       if (b.type !== 'outpost' || b.owner !== def || b.disabled > this.tick) continue;
       const r = LS.outpost.radius[b.level];
-      if (dist2(x, y, b.x, b.y) <= r * r) m = Math.max(m, LS.outpost.defense[b.level]);
+      if (dist2(x, y, b.x, b.y) > r * r) continue;
+      let v = LS.outpost.defense[b.level];
+      if (atk && atk.assault === b.id) v = 1 + (v - 1) * LS.outpost.assault;
+      g = Math.max(g, v);
     }
-    return m;
+    return g;
+  }
+  // the enemy outpost an attack aimed at this tile is going for, if any
+  assaultTarget(target, tile) {
+    if (target < 0) return null;
+    const [x, y] = tileXY(tile); let best = null, bd = 5 * 5;
+    for (const b of this.buildings) {
+      if (b.type !== 'outpost' || b.owner !== target) continue;
+      const d = dist2(x, y, b.x, b.y); if (d <= bd) { bd = d; best = b; }
+    }
+    return best;
   }
 
   stepAttacks() {
@@ -372,7 +403,7 @@ export class Engine {
       while (atk.acc >= 1 && atk.cand.size && guard++ < 30) {
         let best = -1, bs = Infinity;
         for (const c of atk.cand) {
-          const s = dist2(c % W, (c / W) | 0, atk.fx, atk.fy) * 0.02 + Math.random() * 6 + (sup[c] ? 0 : 4);
+          const s = dist2(c % W, (c / W) | 0, atk.fx, atk.fy) * (atk.assault ? 0.4 : 0.02) + Math.random() * 6 + (sup[c] ? 0 : 4);
           if (s < bs) { bs = s; best = c; }
         }
         atk.cand.delete(best);
@@ -381,11 +412,12 @@ export class Engine {
         // taking back land that was just taken from you is quick and cheap
         const reclaim = enemy && this.lostBy[best] === atk.a && this.tick - this.lostAt[best] < 90 * TPS;
         const supplied = sup[best] === 1 || reclaim;
-        const weight = (supplied ? 1 : 1 / ECON.outOfSupplySpeed) * (reclaim ? 0.5 : 1);
+        const og = enemy ? this.outpostGuard(best, atk.t, atk) : 1;
+        const weight = (supplied ? 1 : 1 / ECON.outOfSupplySpeed) * (reclaim ? 0.5 : 1) * (1 + (og - 1) * LS.outpost.slow);
         let cost = ECON.neutralCost * (1 + p.tiles.length / 1500), loss = 0;
         if (enemy) {
           const dens = enemy.troops / Math.max(1, enemy.tiles.length);
-          cost = Math.max(3, dens * 1.3) * this.defenseMult(best, atk.t, atk.a);
+          cost = Math.max(3, dens * 1.3) * this.defenseMult(best, atk.t, atk.a, atk);
           if (reclaim) cost *= 0.7;
           if (atk.counter) cost *= 0.75;
           loss = Math.max(1, dens * 0.8);
@@ -650,10 +682,10 @@ export class Engine {
       const base = 3 + Math.sqrt(t) * 0.8 + p._cityG;
       const room = Math.max(0, 1 - p.troops / p.maxTroops);
       const eco = p.isBot ? this.diff.eco : 1;
-      p.growth = base * 4 * room * this.settings.speed * eco * ECON.growthSpeed * (1 + Math.min(ECON.militaryMaxBonus, p._mil));
+      p.growth = base * 4 * room * this.settings.speed * eco * ECON.growthSpeed * (1 + Math.min(ECON.militaryMaxBonus, p._mil)) * (1 + Math.min(ECON.regionGrowthMax, (p.regBonus || 0) * ECON.regionGrowth));
       p.troops = Math.min(p.maxTroops, p.troops + p.growth * dt);
       if (p.troops > p.maxTroops) p.troops -= (p.troops - p.maxTroops) * 0.02;
-      p.income = (ECON.baseMoney + t * ECON.moneyPerTile + p._money + ECON.workerMoney * Math.sqrt(Math.max(0, p.troops))) * this.settings.speed * eco;
+      p.income = (ECON.baseMoney + t * ECON.moneyPerTile + p._money + (p.regBonus || 0) * ECON.regionMoney + ECON.workerMoney * Math.sqrt(Math.max(0, p.troops))) * this.settings.speed * eco;
       p.money += p.income * dt;
     }
     void cityL;
@@ -706,18 +738,22 @@ export class Engine {
     if (!p.tribe) this.events.push({ k: 'msg', text: `${p.country} has fallen!`, kind: 'warn' });
   }
 
+  unclaimable() { let n = 0; for (let i = 0; i < N; i++) if (this.land[i] && this.owner[i] === -1 && this.fallout[i]) n++; return n; }
   checkEnd() {
     for (const p of this.players) if (p.alive && p.spawned && p.tiles.length === 0 && !this.boats.some(b => b.owner === p.idx)) this.eliminate(p);
     const alive = this.players.filter(p => p.alive && !p.tribe);
     let win = null;
-    for (const p of alive) if (p.tiles.length >= this.landCount * this.settings.winPercent / 100) win = p;
-    if (!win && alive.length === 1 && this.players.length > 1) win = alive[0];
+    const takeover = this.settings.mode === 'takeover';
+    // Full World Takeover: every tile, except land still under fallout
+    const need = (p) => takeover ? p.tiles.length >= this.landCount * 0.97 && p.tiles.length + this.unclaimable() >= this.landCount : p.tiles.length >= this.landCount * this.settings.winPercent / 100;
+    for (const p of alive) if (need(p)) win = p;
+    if (!win && !takeover && alive.length === 1 && this.players.length > 1) win = alive[0];
     if (!win && alive.length === 0) win = this.players[0];
     // everyone left standing is allied and together they hold enough land: shared victory
     let team = null;
     if (!win && alive.length > 1 && alive.every(a => alive.every(b => a === b || this.allied(a.idx, b.idx)))) {
       const land = alive.reduce((s, q) => s + q.tiles.length, 0);
-      if (land >= this.landCount * this.settings.winPercent / 100) { win = alive.reduce((a, b) => b.tiles.length > a.tiles.length ? b : a); team = alive.map(q => q.idx); }
+      if (!takeover && land >= this.landCount * this.settings.winPercent / 100) { win = alive.reduce((a, b) => b.tiles.length > a.tiles.length ? b : a); team = alive.map(q => q.idx); }
     }
     if (win) {
       this.phase = 'over'; this.winner = win.idx;
@@ -744,7 +780,7 @@ export class Engine {
       this.economy();
       for (const p of this.players) if (p.alive && p.isBot) { if (p.tribe) this.tribeThink(p); else botThink(this, p); }
       if (this.settings.tribes && this.tick >= this.nextTribeAt) { this.nextTribeAt = this.tick + (35 + Math.random() * 40) * TPS; if (this.playStart !== this.tick) this.spawnTribe(); }
-      if (this.tick % TPS === 0) this.fillEnclaves();
+      if (this.tick % TPS === 0) { this.fillEnclaves(); this.updateRegions(); }
       this.stepAttacks();
       this.stepBoats();
       this.stepShips();
@@ -800,6 +836,24 @@ export class Engine {
   playerInfo() { return this.players.map(p => ({ idx: p.idx, id: p.id, name: p.name, country: p.country, color: p.color, isBot: p.isBot, tribe: !!p.tribe })); }
   buildingList() { return this.buildings.map(b => ({ id: b.id, type: b.type, owner: b.owner, x: b.x, y: b.y, level: b.level, hp: b.hp, dis: b.disabled > this.tick ? 1 : 0 })); }
 
+  // Who holds each whole real-world country. Holding one pays money and speeds troop growth.
+  updateRegions() {
+    const id = this.regions.id, list = this.regions.list, n = list.length;
+    const hold = this.regScratch || (this.regScratch = new Int16Array(n)); hold.fill(-2);
+    for (let t = 0; t < N; t++) { const r = id[t]; if (r < 0) continue; const o = this.owner[t]; if (hold[r] === -2) hold[r] = o; else if (hold[r] !== o) hold[r] = -1; }
+    for (const p of this.players) p.regBonus = 0;
+    for (let r = 0; r < n; r++) {
+      const h = hold[r] >= 0 && !this.players[hold[r]].tribe ? hold[r] : -1;
+      if (h >= 0) this.players[h].regBonus += list[r].bonus;
+      const was = this.regHolder[r];
+      if (h === was) continue;
+      this.regHolder[r] = h; this.regDirty = true;
+      const R = list[r];
+      if (was >= 0 && this.players[was].alive) this.msg(this.players[was], `You lost your hold on ${R.name}.`, 'error');
+      if (h >= 0) this.msg(this.players[h], `You hold all of ${R.name}! +$${R.bonus * ECON.regionMoney}/s and faster troop growth.`, 'good');
+    }
+  }
+
   makePatch() {
     const patch = {
       tick: this.tick, phase: this.phase, spawnLeft: this.phase === 'spawn' ? Math.max(0, Math.ceil((this.spawnEnd - this.tick) / TPS)) : 0,
@@ -808,11 +862,13 @@ export class Engine {
       ms: this.missiles.map(m => ({ id: m.id, o: m.owner, type: m.type, fx: m.fx, fy: m.fy, tx: m.tx, ty: m.ty, p: +(m.t / m.dur).toFixed(3) })),
       ships: this.ships.map(s => ({ id: s.id, o: s.owner, x: +s.x.toFixed(2), y: +s.y.toFixed(2), a: +s.ang.toFixed(2), level: s.level, hp: s.hp, moving: s.wp.length > 1 })),
       ev: this.events,
+      ...(this.regDirty ? { rh: Array.from(this.regHolder) } : {}),
       atk: this.attacks.map(a => ({ a: a.a, t: a.t, n: Math.floor(a.troops), x: a.lx ?? a.fx, y: a.ly ?? a.fy })),
     };
     if (this.buildingsDirty) { patch.bl = this.buildingList(); this.buildingsDirty = false; }
     if (this.infoDirty) { patch.pi = this.playerInfo(); this.infoDirty = false; }
     if (this.diploDirty) { patch.dip = this.diplomacy(); this.diploDirty = false; }
+    this.regDirty = false;
     this.changes = []; this.events = [];
     return patch;
   }
@@ -821,6 +877,6 @@ export class Engine {
   snapshot() {
     const own = []; for (let i = 0; i < N; i++) if (this.owner[i] >= 0) own.push(i, this.owner[i]);
     const fo = []; for (let i = 0; i < N; i++) if (this.fallout[i]) fo.push(i, this.fallout[i]);
-    return { pi: this.playerInfo(), own, fo, bl: this.buildingList(), phase: this.phase, tick: this.tick, settings: this.settings, dip: this.diplomacy() };
+    return { pi: this.playerInfo(), own, fo, bl: this.buildingList(), phase: this.phase, tick: this.tick, settings: this.settings, dip: this.diplomacy(), rh: Array.from(this.regHolder) };
   }
 }

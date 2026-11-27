@@ -1,5 +1,5 @@
 // Map rendering: terrain, territory pixels, and vector art for buildings and units.
-import { MAP_W as W, MAP_H as H, getLand } from '../shared/map.js';
+import { MAP_W as W, MAP_H as H, getLand, getRegions } from '../shared/map.js';
 
 export function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
 function rgba(r, g, b) { return (255 << 24) | (b << 16) | (g << 8) | r; }
@@ -95,6 +95,18 @@ export class MapPainter {
       const n = (hash(j * 7 + 3) - 0.5) * (k === -1 ? 8 : 3);
       this.terrHi[j * 3] = Math.max(0, Math.min(255, r / tw + n)); this.terrHi[j * 3 + 1] = Math.max(0, Math.min(255, g / tw + n)); this.terrHi[j * 3 + 2] = Math.max(0, Math.min(255, b / tw + n));
     }
+    // real-country outlines: where the smoothed country shape changes between land pixels
+    const rid = getRegions().id;
+    for (let i = 0; i < W * H; i++) this.tk[i] = this.land[i] ? (rid[i] >= 0 ? rid[i] : -3) : -2;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) this.keysFor(x, y);
+    this.regEdge = new Uint8Array(HW * HH);
+    for (let sy = 0; sy < HH; sy++) for (let sx = 0; sx < HW; sx++) {
+      const j = sy * HW + sx, k = this.key[j]; if (k === -2) continue;
+      const kr = sx + 1 < HW ? this.key[j + 1] : k, kd = sy + 1 < HH ? this.key[j + HW] : k;
+      if ((kr !== k && kr !== -2) || (kd !== k && kd !== -2)) this.regEdge[j] = 1;
+    }
+    for (let i = 0; i < W * H; i++) this.tk[i] = this.land[i] ? -1 : -2;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) this.keysFor(x, y);
     this.dirtyTiles = []; this.box = null;
   }
   // shapes of the S*S fine pixels inside tile (x, y), from this.tk
@@ -132,6 +144,7 @@ export class MapPainter {
         r = r * (1 - a) + c[0] * a; g = g * (1 - a) + c[1] * a; b = b * (1 - a) + c[2] * a;
       }
       if (fall) { r = r * 0.5 + 60; g = g * 0.5 + 110; b = b * 0.4 + 20; }
+      if (this.regEdge[j]) { r = r * 0.6 + 102; g = g * 0.6 + 102; b = b * 0.6 + 102; }
       px[j] = rgba(r | 0, g | 0, b | 0);
     }
   }

@@ -118,7 +118,7 @@ function startGame(l) {
     const used = new Set(players.map(p => p.color));
     players.push({ id: 'bot' + i, name: names[i] + ' AI', color: COLORS.find(c => !used.has(c)) || COLORS[i % COLORS.length], isBot: true, country: `Republic of ${names[i]}` });
   }
-  l.game = new Engine({ players, settings: { spawnTime: l.settings.spawnTime, startMoney: l.settings.startMoney, winPercent: l.settings.winPercent, tribes: l.settings.tribes !== false, botLevel: l.settings.botLevel || 'medium' } });
+  l.game = new Engine({ players, settings: { spawnTime: l.settings.spawnTime, startMoney: l.settings.startMoney, winPercent: l.settings.winPercent, tribes: l.settings.tribes !== false, botLevel: l.settings.botLevel || 'medium', mode: l.settings.mode || 'classic' } });
   l.state = 'game';
   for (const m of l.members) sendGameStart(l, m.k);
   pushLobby(l);
@@ -247,7 +247,7 @@ function handle(ws, msg) {
       leaveLobby(k);
       const code = newCode();
       const l = { code, host: k, members: [{ k, ready: true, color: COLORS[0] }], state: 'lobby', chat: [], banned: new Set(),
-        settings: { maxPlayers: 8, bots: 4, startMoney: 1000, spawnTime: 20, winPercent: 60, tribes: true, botLevel: 'medium', public: !!msg.public, name: `${u.username}'s room` } };
+        settings: { maxPlayers: 8, bots: 4, startMoney: 1000, spawnTime: 20, winPercent: 60, tribes: true, botLevel: 'medium', mode: 'classic', public: !!msg.public, name: `${u.username}'s room` } };
       lobbies.set(code, l); userLobby.set(k, code);
       sysChat(l, 'Room created. Share the code or invite friends!');
       pushLobby(l); pushFriendsOfFriends(k); return;
@@ -305,6 +305,7 @@ function handle(ws, msg) {
       if (s.public !== undefined) l.settings.public = !!s.public;
       if (s.tribes !== undefined) l.settings.tribes = !!s.tribes;
       if (['easy', 'medium', 'hard'].includes(s.botLevel)) l.settings.botLevel = s.botLevel;
+      if (['classic', 'takeover'].includes(s.mode)) l.settings.mode = s.mode;
       if (typeof s.name === 'string') l.settings.name = s.name.slice(0, 40) || l.settings.name;
       pushLobby(l); return;
     }

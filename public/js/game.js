@@ -1,6 +1,7 @@
 // Client side of a match: holds the view state, draws the map, and turns taps into actions.
 import { MAP_W as W, MAP_H as H, getLand } from '../shared/map.js';
-import { BUILDINGS, SHIP, CAPITAL, BOMBS, LEVEL_STATS as LS, UPGRADE_MULT, TICK_MS } from '../shared/rules.js';
+import { BUILDINGS, SHIP, CAPITAL, BOMBS, LEVEL_STATS as LS, UPGRADE_MULT, TICK_MS, ECON } from '../shared/rules.js';
+import { getRegions } from '../shared/map.js';
 import { MapPainter, drawBuilding, drawDot, drawShip, drawBoat, drawMissile } from './render.js';
 import { sfx } from './sound.js';
 
@@ -11,7 +12,7 @@ const FALLOUT_TICKS = { bigone: 900, hydrogen: 600, mini: 150, atomic: 350, clus
 const BUILD_TYPES = ['city', 'military', 'factory', 'outpost', 'port', 'battery', 'silo', 'radar', 'ship'];
 const BOMB_ORDER = Object.keys(BOMBS).sort((a, b) => BOMBS[a].cost - BOMBS[b].cost);
 const ICON = { capital: '🏰', military: '🎖️', city: '🏙️', factory: '🏭', port: '⚓', outpost: '🛡️', silo: '🚀', battery: '🎯', radar: '📡', ship: '🚢', atomic: '☢️', hydrogen: '💥', cluster: '🎆', bigone: '🌋', emp: '⚡' };
-const SHORT = { military: 'More troops', city: 'More people', factory: 'Most money', outpost: 'Defense + range', port: 'Boats + money', battery: 'Shoots missiles', silo: 'Launch bombs', radar: 'Better batteries', ship: 'Navy', atomic: 'Medium blast', cluster: 'Splits in 8', hydrogen: 'Huge blast', bigone: 'Biggest bomb', emp: 'Shuts buildings' };
+const SHORT = { military: 'More troops', city: 'More people', factory: 'Most money', outpost: 'Guards land', port: 'Boats + money', battery: 'Shoots missiles', silo: 'Launch bombs', radar: 'Better batteries', ship: 'Navy', atomic: 'Medium blast', cluster: 'Splits in 8', hydrogen: 'Huge blast', bigone: 'Biggest bomb', emp: 'Shuts buildings' };
 const SVG = {
   trophy: '<svg viewBox="0 0 24 24"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0zM7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4"/></svg>',
   chat: '<svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>',
@@ -30,6 +31,7 @@ export class ClientGame {
     this.landCount = this.land.reduce((a, b) => a + b, 0);
     this.owner = new Int16Array(W * H).fill(-1);
     this.painter = new MapPainter();
+    this.regions = getRegions(); this.regHolder = snap.rh || []; this.settings = snap.settings || {};
     this.info = snap.pi; this.painter.setPlayers(this.info);
     for (let k = 0; k < snap.own.length; k += 2) this.owner[snap.own[k]] = snap.own[k + 1];
     for (let k = 0; k < snap.fo.length; k += 2) this.painter.fallout.set(snap.fo[k], snap.fo[k + 1]);
@@ -107,9 +109,10 @@ export class ClientGame {
       <div><span class="ci">⚔️</span><p><b>Invade and defend</b>Tap a neighbour to invade. When someone invades you, hit Fight back. Counter-attacks hit harder and move faster, and land you just lost is cheap to take back. Lose your capital and half your people scatter.</p></div>
       <div><span class="ci">🤝</span><p><b>Alliances</b>Open the flag panel to ask a country to be allies. Allies can't invade or shell each other, and tapping an ally's land sends them people. You can betray an ally, but they'll fight harder against you for a while.</p></div>
       <div><span class="ci">⛵</span><p><b>Islands</b>Tap land across the water and a boat sails your troops there. Ports make boats faster.</p></div>
-      <div><span class="ci">🏙️</span><p><b>Buildings</b>Cities add people, factories add the most money, outposts make land hard to take. Tap a building to upgrade it to level 3.</p></div>
+      <div><span class="ci">🏙️</span><p><b>Buildings</b>Cities add people, factories add the most money, outposts guard the land around them (tap an enemy outpost to charge straight at it, then its land is easy). Tap a building to upgrade it to level 3.</p></div>
       <div><span class="ci">🚀</span><p><b>Bombs</b>Build a Missile Silo, then use Bombs. Batteries shoot missiles down and radars make them better.</p></div>
-      <div><span class="ci">🏆</span><p><b>Win</b>Own the target share of the world's land, or be the last country standing. If everyone left is allied and together owns enough land, the alliance wins.</p></div>
+      <div><span class="ci">⭐</span><p><b>Hold countries</b>Thin outlines on the map are real countries. Own every bit of one to earn extra money and faster troop growth for as long as you hold it. Bigger countries pay more.</p></div>
+      <div><span class="ci">🏆</span><p><b>Win</b>Own the target share of the world's land, or be the last country standing. If everyone left is allied and together owns enough land, the alliance wins. In Full World Takeover you must own all of it.</p></div>
       </div><button class="btn primary xl b-help-close">Got it</button></div></div>
     <div class="modal-wrap hidden give-modal"><div class="modal"><div class="prof-top"><span class="flag-big give-flag"></span><h2 class="give-title">Send people?</h2><p class="muted give-sub"></p></div>
       <div class="give-ratios"></div>
@@ -317,6 +320,7 @@ export class ClientGame {
     const dt = p.tick - this.tick; this.tick = p.tick;
     if (p.pi) { this.info = p.pi; this.painter.setPlayers(this.info); this.painter.setOwner(this.owner); }
     if (p.dip) { this.setDiplomacy(p.dip); this.lbKey = ''; }
+    if (p.rh) { this.regHolder = p.rh; this.lbKey = ''; }
     const ch = p.ch;
     let gained = 0, took = 0;
     for (let k = 0; k < ch.length; k += 2) { if (ch[k + 1] === this.you && this.owner[ch[k]] !== this.you) { gained++; if (this.owner[ch[k]] >= 0) took++; } this.owner[ch[k]] = ch[k + 1]; }
@@ -373,11 +377,20 @@ export class ClientGame {
   onEvent(e) {
     if (e.to && this.myId && e.to !== this.myId) return;
     const now = performance.now();
+    if (e.k === 'msg' && /war has begun/.test(e.text) && this.settings?.mode === 'takeover') e = { ...e, text: 'Full World Takeover! You win only by owning every bit of land.' };
     if (e.k === 'msg') { this.toast(e.text, e.kind); if (e.kind === 'good') sfx.good(); else if (e.kind === 'error') sfx.bad(); }
     else if (e.k === 'boom') {
       this.effects.push({ k: 'boom', x: e.x + 0.5, y: e.y + 0.5, r: e.r, type: e.type, t0: now, dur: e.type === 'bigone' ? 3200 : e.r > 5 ? 1800 : 700 });
       if (e.r >= 5) this.shake = Math.max(this.shake, e.type === 'bigone' ? 22 : e.r);
       sfx.boom(e.r, e.type === 'bigone');
+      if (e.type === 'bld') {
+        sfx.crumble(e.cap);
+        if (e.cap) this.shake = Math.max(this.shake, 9);
+        const bits = [];
+        for (let k = 0; k < (e.cap ? 22 : 12); k++) { const a = Math.random() * Math.PI * 2, v = (0.6 + Math.random()) * (e.cap ? 3.2 : 2); bits.push({ dx: Math.cos(a) * v, dy: Math.sin(a) * v, s: 0.5 + Math.random() }); }
+        this.effects.push({ k: 'debris', x: e.x + 0.5, y: e.y + 0.5, bits, t0: now, dur: e.cap ? 1600 : 1100 });
+        this.effects.push({ k: 'smoke', x: e.x + 0.5, y: e.y + 0.5, r: e.cap ? 5 : 3, t0: now, dur: e.cap ? 3500 : 2400 });
+      }
       if (e.type === 'bigone') this.effects.push({ k: 'flash', t0: now, dur: 900 });
       if (FALLOUT_TICKS[e.type]) {
         const R = Math.ceil(e.r);
@@ -452,13 +465,32 @@ export class ClientGame {
     if (this.selected) this.renderInspector();
   }
 
+  // real-world countries you hold, plus the closest ones to finish
+  heldHtml() {
+    const R = this.regions.list, mine = [];
+    for (let r = 0; r < R.length; r++) if (this.regHolder[r] === this.you) mine.push(R[r]);
+    const near = [];
+    if (this.me()?.alive) {
+      const have = new Int32Array(R.length), id = this.regions.id;
+      for (let t = 0; t < id.length; t++) if (id[t] >= 0 && this.owner[t] === this.you) have[id[t]]++;
+      for (let r = 0; r < R.length; r++) if (this.regHolder[r] !== this.you && have[r] > 0) near.push({ R: R[r], p: have[r] / R[r].size });
+      near.sort((a, b) => b.p - a.p);
+    }
+    const bonus = mine.reduce((s, x) => s + x.bonus, 0);
+    let h = `<h4>Countries you hold</h4>`;
+    h += mine.length ? `<p class="lb-tip">${mine.map(x => `⭐ ${esc(x.name)}`).join(' · ')}<br><b>+$${bonus * ECON.regionMoney}/s</b> and <b>+${Math.round(Math.min(ECON.regionGrowthMax, bonus * ECON.regionGrowth) * 100)}%</b> troop growth</p>`
+      : '<p class="lb-tip">Take every bit of a real country (the thin outlines on the map) to earn money and troops while you hold it.</p>';
+    if (near.length) h += `<p class="lb-tip">Almost there: ${near.slice(0, 3).map(x => `${esc(x.R.name)} ${Math.floor(x.p * 100)}%`).join(' · ')}</p>`;
+    return h;
+  }
+
   // Countries panel: ranking plus alliance actions
   renderCountries(lb) {
     const rows = this.stats.map((s, i) => ({ s, i })).filter(o => o.s.alive && !this.info[o.i]?.tribe).sort((a, b) => Math.round(b.s.tiles / 50) - Math.round(a.s.tiles / 50) || a.i - b.i);
     const live = this.phase === 'play' && this.me()?.alive;
     const pct = (o) => (o.s.tiles / this.landCount * 100).toFixed(1) + '%';
     // rebuild only when the order or alliances change, so buttons stay put under your finger
-    const key = rows.map(o => o.i).join('|') + '/' + [...this.allies].join() + '/' + [...this.sentReq].join() + '/' + [...this.gotReq].join() + live;
+    const key = rows.map(o => o.i).join('|') + '/' + this.regHolder.join() + '/' + [...this.allies].join() + '/' + [...this.sentReq].join() + '/' + [...this.gotReq].join() + live;
     if (lb._key === key && this.lbKey !== '') { rows.forEach((o) => { const el = lb.querySelector(`[data-pct="${o.i}"]`); if (el && el.textContent !== pct(o)) el.textContent = pct(o); }); return; }
     lb._key = key; this.lbKey = key;
     const act = (i) => {
@@ -469,7 +501,8 @@ export class ClientGame {
       return `<button class="mini-btn" data-ally="${i}">🤝 Ally</button>`;
     };
     lb.innerHTML = '<h4>Countries</h4>' + rows.map((o, k) => `<div class="lb-row ${o.i === this.you ? 'me' : ''} ${this.isAlly(o.i) ? 'ally' : ''}"><span class="rk">${k + 1}</span><i style="background:${this.info[o.i].color}"></i><span class="nm">${esc(this.info[o.i].country)}<small data-pct="${o.i}">${pct(o)}</small></span>${act(o.i)}</div>`).join('')
-      + (live ? '<p class="lb-tip">Allies can\'t invade or shell each other. Tap an ally\'s land to send people.</p>' : '');
+      + (live ? '<p class="lb-tip">Allies can\'t invade or shell each other. Tap an ally\'s land to send people.</p>' : '')
+      + this.heldHtml();
     for (const b of lb.querySelectorAll('[data-ally]')) b.onclick = () => this.send({ type: 'ally', to: +b.dataset.ally });
     for (const b of lb.querySelectorAll('[data-accept]')) b.onclick = () => this.send({ type: 'allyAnswer', from: +b.dataset.accept, yes: true });
     for (const b of lb.querySelectorAll('[data-give]')) b.onclick = () => this.askGive(+b.dataset.give);
@@ -616,6 +649,17 @@ export class ClientGame {
     if (this.isAlly(this.owner[tile])) { this.askGive(this.owner[tile]); return; }
     this.send({ type: 'attack', tile, ratio: this.ratio });
     this.effects.push({ k: 'ping', x: w.x, y: w.y, t0: performance.now(), dur: 500 });
+    // tapped land an outpost guards, but not the outpost itself: explain once in a while
+    const foe = this.owner[tile];
+    if (foe >= 0 && performance.now() - (this.guardHintAt || 0) > 15000) {
+      let guard = null, aimed = false;
+      for (const b of this.buildings) {
+        if (b.type !== 'outpost' || b.owner !== foe) continue;
+        const d = (b.x - x) ** 2 + (b.y - y) ** 2, r = LS.outpost.radius[b.level];
+        if (d <= 25) aimed = true; else if (d <= r * r) guard = b;
+      }
+      if (guard && !aimed) { this.guardHintAt = performance.now(); this.toast(`An outpost guards this land, so it's ${LS.outpost.defense[guard.level]}x harder to take. Tap the outpost itself to charge straight at it.`, 'warn'); }
+    }
     let nearMe = false;
     for (let dy = -2; dy <= 2 && !nearMe; dy++) for (let dx = -2; dx <= 2; dx++) { const t = (y + dy) * W + x + dx; if (t >= 0 && t < W * H && this.owner[t] === this.you) { nearMe = true; break; } }
     if (nearMe && this.owner[tile] === -1 && !this.supply[tile] && performance.now() - this.supplyHintAt > 20000) {
@@ -662,6 +706,16 @@ export class ClientGame {
       }
     }
     ctx.stroke(); ctx.setLineDash([]);
+    // land each outpost guards: a tinted circle in the owner's color
+    if (s > 1.2) for (const b of this.buildings) {
+      if (b.type !== 'outpost') continue;
+      const r = LS.outpost.radius[b.level], c = this.info[b.owner]?.color || '#888';
+      ctx.beginPath(); ctx.arc(b.x + 0.5, b.y + 0.5, r, 0, 7);
+      ctx.globalAlpha = 0.1; ctx.fillStyle = c; ctx.fill();
+      ctx.globalAlpha = 0.75; ctx.strokeStyle = c; ctx.lineWidth = 2 * px; ctx.stroke();
+      ctx.globalAlpha = 0.5; ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.8 * px; ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
 
     if (this.selected) {
       const o = this.selected.kind === 'b' ? this.buildings.find(b => b.id === this.selected.id) : this.ships.find(b => b.id === this.selected.id);
@@ -709,6 +763,23 @@ export class ClientGame {
       ctx.lineWidth = fs * 0.16; ctx.strokeText(line, st.cx + 0.5, st.cy + 0.5 + fs * 0.85); ctx.fillText(line, st.cx + 0.5, st.cy + 0.5 + fs * 0.85);
     });
 
+    // real-country names, faint, when zoomed in; held ones get a star in the holder's color
+    if (s > 3.2) {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+      const fs = 10 * px;
+      for (let r = 0; r < this.regions.list.length; r++) {
+        const R = this.regions.list[r]; if (R.size < 40 && s < 7) continue;
+        const x = R.cx + 0.5, y = R.cy + 0.5;
+        if (x < this.cam.x - this.vw / 2 / s - 5 || x > this.cam.x + this.vw / 2 / s + 5 || y < this.cam.y - this.vh / 2 / s - 5 || y > this.cam.y + this.vh / 2 / s + 5) continue;
+        const h = this.regHolder[r] ?? -1;
+        const label = (h >= 0 ? '⭐ ' : '') + R.name.toUpperCase() + `  +${R.bonus}`;
+        ctx.font = `800 ${fs}px Nunito, system-ui, sans-serif`;
+        ctx.globalAlpha = h >= 0 ? 0.95 : 0.6; ctx.lineWidth = 2.5 * px; ctx.strokeStyle = 'rgba(8,12,24,0.7)';
+        ctx.fillStyle = h >= 0 ? (this.info[h]?.color || '#fff') : '#e8ecf4';
+        ctx.strokeText(label, x, y + 22 * px); ctx.fillText(label, x, y + 22 * px);
+      }
+      ctx.globalAlpha = 1; ctx.textBaseline = 'alphabetic';
+    }
     // buildings: big round pins when zoomed in, small dots when far out
     const f = Math.min(1, (now - this.lastPatchAt) / TICK_MS);
     if (s < 2.2) { for (const b of this.buildings) drawDot(ctx, b, this.info[b.owner]?.color || '#888', 5 * px); }
@@ -767,6 +838,23 @@ export class ClientGame {
         ctx.fillStyle = e.c;
         for (let k = 0; k < 6; k++) { const q = (t * 1.4 - k * 0.08); if (q < 0 || q > 1) continue; const x = e.x1 + (e.x2 - e.x1) * q, y = e.y1 + (e.y2 - e.y1) * q - Math.sin(Math.PI * q) * 6; ctx.beginPath(); ctx.arc(x, y, 3.5 * px, 0, 7); ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.2 * px; ctx.stroke(); }
       }
+      else if (e.k === 'debris') {
+        for (const b of e.bits) {
+          const x = e.x + b.dx * t, y = e.y + b.dy * t - Math.sin(Math.PI * Math.min(1, t * 1.2)) * 1.5 * b.s;
+          ctx.globalAlpha = 1 - t * t; ctx.fillStyle = b.s > 1 ? '#3a2a20' : '#ffb347';
+          const z = (0.25 + 0.25 * b.s) * Math.max(1, 3 * px);
+          ctx.fillRect(x - z / 2, y - z / 2, z, z);
+        }
+        ctx.globalAlpha = 1;
+      }
+      else if (e.k === 'smoke') {
+        for (let k = 0; k < 5; k++) {
+          const q = t * 0.9 + k * 0.03, rr = e.r * (0.3 + q * 0.8) * (0.7 + k * 0.1);
+          ctx.globalAlpha = Math.max(0, 0.32 * (1 - t)); ctx.fillStyle = '#2a2a2e';
+          ctx.beginPath(); ctx.arc(e.x + Math.sin(k * 2.1) * e.r * 0.4, e.y - q * e.r * 0.9 + Math.cos(k * 1.7) * e.r * 0.3, rr, 0, 7); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
       else if (e.k === 'ping') { ctx.strokeStyle = `rgba(255,255,255,${1 - t})`; ctx.lineWidth = 3 * px; ctx.beginPath(); ctx.arc(e.x, e.y, (6 + t * 16) * px, 0, 7); ctx.stroke(); }
     }
     const flash = this.effects.find(e => e.k === 'flash');
@@ -784,7 +872,7 @@ function statLine(type, lv) {
     case 'factory': return `+$${S.money[lv]}/s`;
     case 'military': return `+${Math.round(S.growth[lv] * 100)}% troop growth, +${fmt(S.maxTroops[lv])} max troops`;
     case 'port': return `+$${S.money[lv]}/s, faster boats, supply ${S.supply[lv]}`;
-    case 'outpost': return `Land within ${S.radius[lv]} is ${S.defense[lv]}x harder to take, supply ${S.supply[lv]}`;
+    case 'outpost': return `Land within ${S.radius[lv]} is ${S.defense[lv]}x harder to take and slower to fall, unless attackers charge the outpost itself. Supply ${S.supply[lv]}`;
     case 'silo': return `Reloads in ${S.cooldown[lv] / 10}s · ${Object.values(BOMBS).filter(b => b.silo === lv).map(b => b.name).join(', ')} unlocked`;
     case 'battery': return `Range ${S.radius[lv]} · ${Math.round(S.chance[lv] * 100)}% hit · reload ${S.cooldown[lv] / 10}s`;
     case 'radar': return `Batteries within ${S.radius[lv]} get +${Math.round(S.boost[lv] * 100)}% hit chance`;

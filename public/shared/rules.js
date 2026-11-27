@@ -21,7 +21,7 @@ export const LEVEL_STATS = {
   factory: { money: [0, 16, 36, 75] },
   port:    { money: [0, 6, 12, 20], boatSpeed: [0, 0.12, 0.24, 0.38], supply: [0, 8, 10, 13] },
   military: { growth: [0, 0.3, 0.6, 1.0], maxTroops: [0, 2000, 5000, 10000] }, // growth: extra troop growth (0.3 = +30%)
-  outpost: { radius: [0, 10, 14, 18], defense: [0, 1.8, 2.6, 3.5], supply: [0, 9, 12, 16] },
+  outpost: { radius: [0, 10, 14, 18], defense: [0, 3, 4.5, 6], assault: 0.3, slow: 0.5, supply: [0, 9, 12, 16] },
   silo:    { cooldown: [0, 200, 120, 60] },               // ticks between launches
   battery: { radius: [0, 16, 22, 30], chance: [0, 0.5, 0.7, 0.85], cooldown: [0, 60, 40, 25] },
   radar:   { radius: [0, 30, 45, 60], boost: [0, 0.08, 0.12, 0.18] },
@@ -55,6 +55,9 @@ export const ECON = {
   attackSpeed: 1.6,       // overall pace of land being taken
   growthSpeed: 1.3,       // overall pace of troop growth
   militaryMaxBonus: 2,    // military bases can at most triple troop growth
+  regionMoney: 3,         // holding a whole real-world country: $ per second per bonus point
+  regionGrowth: 0.02,     // ...and this much extra troop growth per bonus point
+  regionGrowthMax: 1,     // at most double troop growth from countries held
   spawnRadius: 3,
   maxBoats: 4,
 };
